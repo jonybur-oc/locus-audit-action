@@ -1,0 +1,25 @@
+name: Locus Story Coverage
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  story-coverage:
+    name: Story coverage audit
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write  # needed to post comments
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locus story audit
+        uses: locus-dev/audit@v1
+        with:
+          stories-path: stories.yaml        # default — omit if using the default path
+          min-coverage: 80                   # fail if < 80% of stories are covered
+          fail-on-missing: false             # set true to fail on any uncovered story
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

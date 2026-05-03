@@ -1,0 +1,56 @@
+name: 'Locus Story Coverage Audit'
+description: 'Audits PR diff against stories.yaml — checks which user stories are covered, posts a coverage report, and optionally fails the check.'
+author: 'Jony Bursztyn'
+
+branding:
+  icon: 'check-square'
+  color: 'blue'
+
+inputs:
+  stories-path:
+    description: 'Path to stories.yaml (relative to repo root)'
+    required: false
+    default: 'stories.yaml'
+
+  min-coverage:
+    description: 'Minimum required story coverage percentage (0–100). Set to 0 to report only.'
+    required: false
+    default: '0'
+
+  fail-on-missing:
+    description: 'Fail the check if any stories are completely unaddressed in the diff'
+    required: false
+    default: 'false'
+
+  anthropic-api-key:
+    description: 'Anthropic API key for Claude story coverage analysis'
+    required: true
+
+  github-token:
+    description: 'GitHub token for posting PR comments'
+    required: false
+    default: ${{ github.token }}
+
+  model:
+    description: 'Claude model to use for analysis'
+    required: false
+    default: 'claude-haiku-4-5'
+
+  status-only:
+    description: 'Skip PR comment, only set commit status (useful for non-PR runs)'
+    required: false
+    default: 'false'
+
+outputs:
+  coverage-percent:
+    description: 'Story coverage percentage (integer 0–100)'
+  stories-covered:
+    description: 'Comma-separated list of covered story IDs'
+  stories-missing:
+    description: 'Comma-separated list of uncovered story IDs'
+  passed:
+    description: 'Whether the audit passed (true/false)'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

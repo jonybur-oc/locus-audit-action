@@ -1,0 +1,41 @@
+{
+  "name": "locus-audit-action",
+  "version": "1.0.0",
+  "description": "GitHub Action: Locus story coverage audit for PRs",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "ncc build src/index.ts --license licenses.txt -o dist",
+    "build:watch": "ncc build src/index.ts -o dist --watch",
+    "type-check": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "keywords": [
+    "github-action",
+    "locus",
+    "user-stories",
+    "story-coverage",
+    "stories-yaml",
+    "pr-check",
+    "ai-audit",
+    "claude"
+  ],
+  "author": {
+    "name": "Jony Bursztyn",
+    "url": "https://github.com/jonybur"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/github": "^6.0.0",
+    "@anthropic-ai/sdk": "^0.32.0",
+    "yaml": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vercel/ncc": "^0.38.2",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
