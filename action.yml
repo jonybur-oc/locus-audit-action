@@ -17,6 +17,11 @@ inputs:
     required: false
     default: '0'
 
+  fail-on-divergence:
+    description: 'Fail the check if any stories are actively contradicted by the diff (diverged)'
+    required: false
+    default: 'false'
+
   fail-on-missing:
     description: 'Fail the check if any stories are completely unaddressed in the diff'
     required: false
@@ -45,9 +50,11 @@ outputs:
   coverage-percent:
     description: 'Story coverage percentage (integer 0–100)'
   stories-covered:
-    description: 'Comma-separated list of covered story IDs'
+    description: 'Comma-separated list of covered story IDs (satisfied or partial)'
   stories-missing:
     description: 'Comma-separated list of uncovered story IDs'
+  stories-diverged:
+    description: 'Comma-separated list of story IDs that diverged from spec'
   passed:
     description: 'Whether the audit passed (true/false)'
 

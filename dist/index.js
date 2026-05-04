@@ -35684,24 +35684,24 @@ exports.auditStoriesWithClaude = auditStoriesWithClaude;
 exports.buildReport = buildReport;
 const sdk_1 = __importDefault(__nccwpck_require__(121));
 const core = __importStar(__nccwpck_require__(7484));
-const SYSTEM_PROMPT = `You are a story coverage auditor. Given a PR diff and a list of user stories, 
-determine which stories are addressed by the changes in the diff.
+const SYSTEM_PROMPT = `You are a story divergence auditor. Given a PR diff and a list of user stories with acceptance criteria, determine:
 
-A story is "covered" if:
-- The diff contains code changes that implement the story's described functionality, OR
-- The diff contains test code that validates the story's acceptance criteria, OR
-- The diff contains meaningful progress toward the story (partial implementations count)
+1. Which stories this PR **satisfies** (all acceptance criteria met by changes in the diff)
+2. Which stories are **partial** (some ACs met, none contradicted)
+3. Which stories are **not-covered** (diff doesn't touch this story at all)
+4. Which stories are **diverged** (diff actively contradicts or bypasses at least one acceptance criterion)
 
-A story is NOT covered if:
-- The diff only touches unrelated files (docs, config, other features)
-- The diff contains no code relevant to the story's functionality
+Definitions:
+- **satisfied**: The diff implements the described functionality in a way consistent with ALL acceptance criteria. 
+- **partial**: The diff advances some acceptance criteria but not all, and none are violated.
+- **not-covered**: This PR touches none of the files or logic related to this story.
+- **diverged**: The diff introduces code that bypasses, disables, or contradicts one or more acceptance criteria. E.g. removing an auth check that was an AC, or hardcoding a value the AC says must be dynamic.
 
-Be pragmatic: small PRs legitimately touch only a subset of stories. 
-Focus on whether this specific diff advances the story, not whether the story is complete.
+Be surgical: a story is only "diverged" if code ACTIVELY contradicts the story, not merely if it's incomplete.
 
 Respond ONLY with valid JSON. No markdown fences, no explanation outside the JSON.`;
 /**
- * Calls Claude to audit which stories are covered by the PR diff.
+ * Calls Claude to audit divergence and coverage for all stories against the PR diff.
  */
 async function auditStoriesWithClaude(stories, diff, apiKey, model) {
     const client = new sdk_1.default({ apiKey });
@@ -35731,26 +35731,34 @@ ${diff.full_diff || '[no patch data available]'}
 
 ## Task
 
-For each story, determine if this PR diff covers it.
+For each story, determine: satisfied / partial / not-covered / diverged.
+If the story has acceptance_criteria, also audit each criterion individually.
 
 Respond with this exact JSON structure:
 {
   "results": [
     {
       "id": "US-01",
-      "covered": true,
+      "status": "satisfied",
       "confidence": "high",
-      "evidence": "LoginForm.tsx implements the email/password fields described in the story",
-      "files_touched": ["src/components/LoginForm.tsx", "src/api/auth.ts"]
+      "evidence": "LoginForm.tsx implements email+password fields and token storage as described",
+      "files_touched": ["src/components/LoginForm.tsx"],
+      "ac_results": [
+        {
+          "criterion": "User can submit email and password",
+          "status": "satisfied",
+          "evidence": "LoginForm renders <input type=email> and <input type=password>"
+        }
+      ]
     }
   ]
 }
 
-Include ALL ${stories.length} stories in your results array, in any order.`;
-    core.debug(`Calling ${model} to audit ${stories.length} stories against PR #${diff.pr_number}`);
+Include ALL ${stories.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
+    core.debug(`Calling ${model} to audit ${stories.length} stories (divergence mode) against PR #${diff.pr_number}`);
     const response = await client.messages.create({
         model,
-        max_tokens: 4096,
+        max_tokens: 8192,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userPrompt }],
     });
@@ -35760,7 +35768,9 @@ Include ALL ${stories.length} stories in your results array, in any order.`;
     }
     let parsed;
     try {
-        parsed = JSON.parse(content.text);
+        // Strip markdown fences if model includes them despite instructions
+        const jsonText = content.text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+        parsed = JSON.parse(jsonText);
     }
     catch {
         core.debug(`Raw Claude response: ${content.text.slice(0, 500)}`);
@@ -35777,44 +35787,59 @@ Include ALL ${stories.length} stories in your results array, in any order.`;
     return stories.map(story => {
         const r = resultMap.get(story.id);
         if (!r) {
-            // Claude missed this story — mark as uncovered with low confidence
             return {
                 story,
+                status: 'not-covered',
                 covered: false,
                 confidence: 'low',
                 evidence: 'story not evaluated by auditor',
                 files_touched: [],
             };
         }
+        const acResults = r.ac_results?.map(ac => ({
+            criterion: ac.criterion,
+            status: ac.status,
+            evidence: ac.evidence,
+        }));
+        const acTotal = acResults?.length ?? 0;
+        const acSatisfied = acResults?.filter(ac => ac.status === 'satisfied').length ?? 0;
         return {
             story,
-            covered: r.covered,
+            status: r.status,
+            covered: r.status === 'satisfied' || r.status === 'partial',
             confidence: r.confidence,
             evidence: r.evidence,
             files_touched: r.files_touched,
+            ac_results: acResults,
+            acs_satisfied: acTotal > 0 ? acSatisfied : undefined,
+            acs_total: acTotal > 0 ? acTotal : undefined,
         };
     });
 }
 /**
  * Builds the AuditReport from raw story results and action config.
  */
-function buildReport(results, minCoverage, failOnMissing) {
+function buildReport(results, minCoverage, failOnMissing, failOnDivergence) {
     const total = results.length;
     const covered = results.filter(r => r.covered).length;
-    const uncovered = total - covered;
+    const uncovered = results.filter(r => r.status === 'not-covered').length;
+    const diverged = results.filter(r => r.status === 'diverged').length;
     const coverage_percent = total === 0 ? 100 : Math.round((covered / total) * 100);
     const coveragePasses = coverage_percent >= minCoverage;
     const missingPasses = !failOnMissing || uncovered === 0;
-    const passed = coveragePasses && missingPasses;
+    const divergencePasses = !failOnDivergence || diverged === 0;
+    const passed = coveragePasses && missingPasses && divergencePasses;
     return {
         total,
         covered,
         uncovered,
+        diverged,
         coverage_percent,
         results,
         passed,
         min_coverage: minCoverage,
         fail_on_missing: failOnMissing,
+        fail_on_divergence: failOnDivergence,
     };
 }
 
@@ -35865,25 +35890,59 @@ exports.postOrUpdateComment = postOrUpdateComment;
 const github = __importStar(__nccwpck_require__(3228));
 const core = __importStar(__nccwpck_require__(7484));
 const COMMENT_MARKER = '<!-- locus-audit-action -->';
-function badge(percent, passed) {
-    const color = passed ? 'brightgreen' : percent >= 50 ? 'yellow' : 'red';
+function badge(percent, passed, hasDivergence) {
+    const color = hasDivergence ? 'critical' : passed ? 'brightgreen' : percent >= 50 ? 'yellow' : 'red';
     return `![Locus Coverage](https://img.shields.io/badge/story%20coverage-${percent}%25-${color}?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik05IDEyLjVsLTMuNS0zLjUtMS41IDEuNUw5IDE1LjVsMTAtMTAtMS41LTEuNXoiLz48L3N2Zz4=)`;
 }
+/** Icon for story-level status */
+function statusIcon(status) {
+    switch (status) {
+        case 'satisfied': return '✅';
+        case 'partial': return '⚠️';
+        case 'not-covered': return '—';
+        case 'diverged': return '❌';
+    }
+}
+/** Short label for story-level status */
+function statusLabel(r) {
+    switch (r.status) {
+        case 'satisfied': return 'satisfied';
+        case 'partial': {
+            const frac = (r.acs_satisfied !== undefined && r.acs_total !== undefined)
+                ? ` (${r.acs_satisfied}/${r.acs_total} ACs covered)`
+                : '';
+            return `partial${frac}`;
+        }
+        case 'not-covered': return 'not covered';
+        case 'diverged': return `diverged — ${r.evidence.slice(0, 80)}`;
+    }
+}
 function storyRow(r) {
-    const icon = r.covered ? '✅' : '❌';
+    const icon = statusIcon(r.status);
+    const label = statusLabel(r);
     const conf = r.confidence === 'high' ? '' : ` _(${r.confidence})_`;
     const files = r.files_touched.length > 0
         ? `<br><sub>${r.files_touched.slice(0, 3).join(', ')}${r.files_touched.length > 3 ? ` +${r.files_touched.length - 3} more` : ''}</sub>`
         : '';
-    return `| ${icon} | \`${r.story.id}\` | ${r.story.title}${conf} | ${r.evidence}${files} |`;
+    return `| ${icon} | \`${r.story.id}\` | ${r.story.title}${conf} | ${label}${files} |`;
 }
 function buildCommentBody(report) {
-    const { coverage_percent, covered, total, passed, min_coverage, fail_on_missing } = report;
+    const { coverage_percent, covered, total, passed, min_coverage, fail_on_missing, fail_on_divergence, diverged } = report;
+    const hasDivergence = diverged > 0;
+    const affectedCount = report.results.filter(r => r.status !== 'not-covered').length;
+    const headerLine = affectedCount > 0
+        ? `Locus Audit — ${affectedCount} ${affectedCount === 1 ? 'story' : 'stories'} affected by this PR`
+        : 'Locus Audit — no stories affected by this PR';
     const statusLine = passed
-        ? `✅ **Audit passed** — ${coverage_percent}% story coverage (${covered}/${total} stories)`
-        : `❌ **Audit failed** — ${coverage_percent}% story coverage (${covered}/${total} stories)`;
+        ? `✅ **Audit passed** — ${coverage_percent}% story coverage (${covered}/${total})`
+        : hasDivergence
+            ? `❌ **Audit failed** — ${diverged} ${diverged === 1 ? 'story' : 'stories'} diverged from spec`
+            : `❌ **Audit failed** — ${coverage_percent}% story coverage (${covered}/${total})`;
     const failReasons = [];
     if (!passed) {
+        if (hasDivergence && fail_on_divergence) {
+            failReasons.push(`${diverged} diverged ${diverged === 1 ? 'story' : 'stories'}`);
+        }
         if (coverage_percent < min_coverage) {
             failReasons.push(`coverage ${coverage_percent}% < required ${min_coverage}%`);
         }
@@ -35894,21 +35953,32 @@ function buildCommentBody(report) {
     const failBlock = failReasons.length > 0
         ? `\n> ${failReasons.join(' · ')}\n`
         : '';
-    const coveredRows = report.results.filter(r => r.covered).map(storyRow);
-    const uncoveredRows = report.results.filter(r => !r.covered).map(storyRow);
-    const tableHeader = `| | ID | Story | Evidence |\n|---|---|---|---|`;
+    const tableHeader = `| | ID | Story | Status |\n|---|---|---|---|`;
+    // Group stories by status for display
+    const divergedRows = report.results.filter(r => r.status === 'diverged').map(storyRow);
+    const partialRows = report.results.filter(r => r.status === 'partial').map(storyRow);
+    const satisfiedRows = report.results.filter(r => r.status === 'satisfied').map(storyRow);
+    const notCoveredRows = report.results.filter(r => r.status === 'not-covered').map(storyRow);
     let body = `${COMMENT_MARKER}
-## ${badge(coverage_percent, passed)} Locus Story Coverage
+## ${badge(coverage_percent, passed, hasDivergence)} ${headerLine}
 
 ${statusLine}
 ${failBlock}`;
-    if (coveredRows.length > 0) {
-        body += `\n### ✅ Covered (${coveredRows.length})\n\n${tableHeader}\n${coveredRows.join('\n')}\n`;
+    if (divergedRows.length > 0) {
+        body += `\n### ❌ Diverged (${divergedRows.length})\n\n${tableHeader}\n${divergedRows.join('\n')}\n`;
     }
-    if (uncoveredRows.length > 0) {
-        body += `\n### ❌ Not covered (${uncoveredRows.length})\n\n${tableHeader}\n${uncoveredRows.join('\n')}\n`;
+    if (partialRows.length > 0) {
+        body += `\n### ⚠️ Partial (${partialRows.length})\n\n${tableHeader}\n${partialRows.join('\n')}\n`;
     }
-    body += `\n---\n<sub>Powered by [Locus](https://prototyper.app) · [stories.yaml spec](https://github.com/jonybur/prototyper)</sub>`;
+    if (satisfiedRows.length > 0) {
+        body += `\n### ✅ Satisfied (${satisfiedRows.length})\n\n${tableHeader}\n${satisfiedRows.join('\n')}\n`;
+    }
+    if (notCoveredRows.length > 0) {
+        // Collapse not-covered to keep comment clean — use a <details> block
+        body += `\n<details>\n<summary>— Not covered by this PR (${notCoveredRows.length})</summary>\n\n${tableHeader}\n${notCoveredRows.join('\n')}\n\n</details>\n`;
+    }
+    const coverageLine = `Coverage: ${covered}/${total} stories (${coverage_percent}%)`;
+    body += `\n---\n<sub>${coverageLine} · Powered by [Locus](https://prototyper.app) · [stories.yaml spec](https://github.com/jonybur/prototyper)</sub>`;
     return body;
 }
 /**
@@ -36057,8 +36127,9 @@ async function getPrDiff(githubToken) {
 /**
  * Locus Story Coverage Audit — GitHub Action
  *
- * Reads stories.yaml, fetches the PR diff, calls Claude to check coverage,
- * posts a comment on the PR, and optionally fails the check.
+ * Reads stories.yaml, fetches the PR diff, calls Claude to check coverage
+ * and divergence, posts a structured comment on the PR, and optionally
+ * fails the check.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -36104,6 +36175,7 @@ async function run() {
         storiesPath: core.getInput('stories-path') || 'stories.yaml',
         minCoverage: parseInt(core.getInput('min-coverage') || '0', 10),
         failOnMissing: core.getInput('fail-on-missing') === 'true',
+        failOnDivergence: core.getInput('fail-on-divergence') === 'true',
         anthropicApiKey: core.getInput('anthropic-api-key', { required: true }),
         githubToken: core.getInput('github-token') || process.env.GITHUB_TOKEN || '',
         model: core.getInput('model') || 'claude-haiku-4-5',
@@ -36112,6 +36184,7 @@ async function run() {
     core.debug(`stories-path: ${inputs.storiesPath}`);
     core.debug(`min-coverage: ${inputs.minCoverage}`);
     core.debug(`fail-on-missing: ${inputs.failOnMissing}`);
+    core.debug(`fail-on-divergence: ${inputs.failOnDivergence}`);
     core.debug(`model: ${inputs.model}`);
     // 1. Parse stories.yaml
     core.info(`📖 Reading stories from ${inputs.storiesPath}`);
@@ -36128,6 +36201,7 @@ async function run() {
         core.setOutput('coverage-percent', '100');
         core.setOutput('stories-covered', '');
         core.setOutput('stories-missing', '');
+        core.setOutput('stories-diverged', '');
         core.setOutput('passed', 'true');
         return;
     }
@@ -36146,7 +36220,7 @@ async function run() {
     if (diff.files.length === 0) {
         core.warning('PR has no file changes — coverage is 0%');
     }
-    // 3. Audit with Claude
+    // 3. Audit with Claude (divergence + coverage)
     core.info(`🤖 Auditing with ${inputs.model}...`);
     let auditResults;
     try {
@@ -36157,12 +36231,17 @@ async function run() {
         return;
     }
     // 4. Build report
-    const report = (0, audit_1.buildReport)(auditResults, inputs.minCoverage, inputs.failOnMissing);
-    core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total})`);
+    const report = (0, audit_1.buildReport)(auditResults, inputs.minCoverage, inputs.failOnMissing, inputs.failOnDivergence);
+    const divergedIds = auditResults.filter(r => r.status === 'diverged').map(r => r.story.id);
+    if (divergedIds.length > 0) {
+        core.warning(`⚠️  Diverged stories: ${divergedIds.join(', ')}`);
+    }
+    core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total}) — ${report.diverged} diverged`);
     // 5. Set outputs
     core.setOutput('coverage-percent', String(report.coverage_percent));
     core.setOutput('stories-covered', auditResults.filter(r => r.covered).map(r => r.story.id).join(','));
-    core.setOutput('stories-missing', auditResults.filter(r => !r.covered).map(r => r.story.id).join(','));
+    core.setOutput('stories-missing', auditResults.filter(r => r.status === 'not-covered').map(r => r.story.id).join(','));
+    core.setOutput('stories-diverged', divergedIds.join(','));
     core.setOutput('passed', String(report.passed));
     // 6. Post PR comment (unless status-only)
     if (!inputs.statusOnly) {
@@ -36172,18 +36251,21 @@ async function run() {
             await (0, comment_1.postOrUpdateComment)(inputs.githubToken, commentBody);
         }
         catch (err) {
-            // Non-fatal: log but don't fail the action
+            // Non-fatal — log warning but don't fail the action for a comment failure
             core.warning(`Failed to post PR comment: ${err.message}`);
         }
     }
-    // 7. Fail if needed
+    // 7. Fail check if configured
     if (!report.passed) {
         const reasons = [];
-        if (report.coverage_percent < report.min_coverage) {
-            reasons.push(`coverage ${report.coverage_percent}% < required ${report.min_coverage}%`);
+        if (report.diverged > 0 && inputs.failOnDivergence) {
+            reasons.push(`${report.diverged} diverged ${report.diverged === 1 ? 'story' : 'stories'} (${divergedIds.join(', ')})`);
         }
-        if (report.fail_on_missing && report.uncovered > 0) {
-            reasons.push(`${report.uncovered} stories not covered`);
+        if (report.coverage_percent < inputs.minCoverage) {
+            reasons.push(`coverage ${report.coverage_percent}% < required ${inputs.minCoverage}%`);
+        }
+        if (inputs.failOnMissing && report.uncovered > 0) {
+            reasons.push(`${report.uncovered} uncovered ${report.uncovered === 1 ? 'story' : 'stories'}`);
         }
         core.setFailed(`Locus audit failed: ${reasons.join('; ')}`);
     }
@@ -36191,9 +36273,7 @@ async function run() {
         core.info('✅ Locus audit passed');
     }
 }
-run().catch(err => {
-    core.setFailed(`Unexpected error: ${err.message}`);
-});
+run().catch(err => core.setFailed(`Unexpected error: ${err.message}`));
 
 
 /***/ }),

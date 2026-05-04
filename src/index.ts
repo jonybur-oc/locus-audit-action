@@ -1,8 +1,9 @@
 /**
  * Locus Story Coverage Audit — GitHub Action
  *
- * Reads stories.yaml, fetches the PR diff, calls Claude to check coverage,
- * posts a comment on the PR, and optionally fails the check.
+ * Reads stories.yaml, fetches the PR diff, calls Claude to check coverage
+ * and divergence, posts a structured comment on the PR, and optionally
+ * fails the check.
  */
 
 import * as core from '@actions/core';
@@ -17,6 +18,7 @@ async function run(): Promise<void> {
     storiesPath: core.getInput('stories-path') || 'stories.yaml',
     minCoverage: parseInt(core.getInput('min-coverage') || '0', 10),
     failOnMissing: core.getInput('fail-on-missing') === 'true',
+    failOnDivergence: core.getInput('fail-on-divergence') === 'true',
     anthropicApiKey: core.getInput('anthropic-api-key', { required: true }),
     githubToken: core.getInput('github-token') || process.env.GITHUB_TOKEN || '',
     model: core.getInput('model') || 'claude-haiku-4-5',
@@ -26,6 +28,7 @@ async function run(): Promise<void> {
   core.debug(`stories-path: ${inputs.storiesPath}`);
   core.debug(`min-coverage: ${inputs.minCoverage}`);
   core.debug(`fail-on-missing: ${inputs.failOnMissing}`);
+  core.debug(`fail-on-divergence: ${inputs.failOnDivergence}`);
   core.debug(`model: ${inputs.model}`);
 
   // 1. Parse stories.yaml
@@ -43,6 +46,7 @@ async function run(): Promise<void> {
     core.setOutput('coverage-percent', '100');
     core.setOutput('stories-covered', '');
     core.setOutput('stories-missing', '');
+    core.setOutput('stories-diverged', '');
     core.setOutput('passed', 'true');
     return;
   }
@@ -65,7 +69,7 @@ async function run(): Promise<void> {
     core.warning('PR has no file changes — coverage is 0%');
   }
 
-  // 3. Audit with Claude
+  // 3. Audit with Claude (divergence + coverage)
   core.info(`🤖 Auditing with ${inputs.model}...`);
   let auditResults;
   try {
@@ -81,14 +85,25 @@ async function run(): Promise<void> {
   }
 
   // 4. Build report
-  const report = buildReport(auditResults, inputs.minCoverage, inputs.failOnMissing);
+  const report = buildReport(
+    auditResults,
+    inputs.minCoverage,
+    inputs.failOnMissing,
+    inputs.failOnDivergence
+  );
 
-  core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total})`);
+  const divergedIds = auditResults.filter(r => r.status === 'diverged').map(r => r.story.id);
+  if (divergedIds.length > 0) {
+    core.warning(`⚠️  Diverged stories: ${divergedIds.join(', ')}`);
+  }
+
+  core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total}) — ${report.diverged} diverged`);
 
   // 5. Set outputs
   core.setOutput('coverage-percent', String(report.coverage_percent));
   core.setOutput('stories-covered', auditResults.filter(r => r.covered).map(r => r.story.id).join(','));
-  core.setOutput('stories-missing', auditResults.filter(r => !r.covered).map(r => r.story.id).join(','));
+  core.setOutput('stories-missing', auditResults.filter(r => r.status === 'not-covered').map(r => r.story.id).join(','));
+  core.setOutput('stories-diverged', divergedIds.join(','));
   core.setOutput('passed', String(report.passed));
 
   // 6. Post PR comment (unless status-only)
@@ -98,19 +113,22 @@ async function run(): Promise<void> {
       const commentBody = buildCommentBody(report);
       await postOrUpdateComment(inputs.githubToken, commentBody);
     } catch (err) {
-      // Non-fatal: log but don't fail the action
+      // Non-fatal — log warning but don't fail the action for a comment failure
       core.warning(`Failed to post PR comment: ${(err as Error).message}`);
     }
   }
 
-  // 7. Fail if needed
+  // 7. Fail check if configured
   if (!report.passed) {
     const reasons: string[] = [];
-    if (report.coverage_percent < report.min_coverage) {
-      reasons.push(`coverage ${report.coverage_percent}% < required ${report.min_coverage}%`);
+    if (report.diverged > 0 && inputs.failOnDivergence) {
+      reasons.push(`${report.diverged} diverged ${report.diverged === 1 ? 'story' : 'stories'} (${divergedIds.join(', ')})`);
     }
-    if (report.fail_on_missing && report.uncovered > 0) {
-      reasons.push(`${report.uncovered} stories not covered`);
+    if (report.coverage_percent < inputs.minCoverage) {
+      reasons.push(`coverage ${report.coverage_percent}% < required ${inputs.minCoverage}%`);
+    }
+    if (inputs.failOnMissing && report.uncovered > 0) {
+      reasons.push(`${report.uncovered} uncovered ${report.uncovered === 1 ? 'story' : 'stories'}`);
     }
     core.setFailed(`Locus audit failed: ${reasons.join('; ')}`);
   } else {
@@ -118,6 +136,4 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch(err => {
-  core.setFailed(`Unexpected error: ${(err as Error).message}`);
-});
+run().catch(err => core.setFailed(`Unexpected error: ${(err as Error).message}`));
