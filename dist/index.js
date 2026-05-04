@@ -35701,12 +35701,42 @@ Be surgical: a story is only "diverged" if code ACTIVELY contradicts the story, 
 
 Respond ONLY with valid JSON. No markdown fences, no explanation outside the JSON.`;
 /**
+ * Status values that should be excluded from the Claude audit.
+ *
+ * - 'deprecated': spec rule 8.1.5 — audit tools MUST NOT flag deprecated stories
+ *   as diverged or uncovered. Excluded entirely.
+ * - 'in-progress': set by humans to signal active development. Sending to Claude
+ *   is noise — the code is intentionally incomplete. Excluded from coverage calc.
+ * - 'implemented': already done; skip unless the PR could regress it (future work).
+ *
+ * Stories with these statuses are returned as 'skipped' results so the comment
+ * can display them in a separate collapsed section.
+ */
+const SKIP_STATUSES = new Set(['deprecated', 'in-progress', 'implemented']);
+/**
  * Calls Claude to audit divergence and coverage for all stories against the PR diff.
+ * Stories with skip-statuses (deprecated, in-progress, implemented) are excluded
+ * from the Claude call and returned with status='skipped'.
  */
 async function auditStoriesWithClaude(stories, diff, apiKey, model) {
     const client = new sdk_1.default({ apiKey });
+    // Split stories into auditable vs skipped
+    const auditable = stories.filter(s => !SKIP_STATUSES.has(s.status ?? ''));
+    const skipped = stories.filter(s => SKIP_STATUSES.has(s.status ?? ''));
+    core.debug(`Auditing ${auditable.length} stories; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
+    // Return early if nothing to audit
+    if (auditable.length === 0) {
+        return skipped.map(story => ({
+            story,
+            status: 'skipped',
+            covered: false,
+            confidence: 'high',
+            evidence: `skipped — story status is '${story.status}'`,
+            files_touched: [],
+        }));
+    }
     // Build a compact story list for the prompt
-    const storyList = stories.map(s => {
+    const storyList = auditable.map(s => {
         const lines = [`id: ${s.id}`, `title: ${s.title}`];
         if (s.description)
             lines.push(`description: ${s.description.slice(0, 200)}`);
@@ -35719,7 +35749,7 @@ async function auditStoriesWithClaude(stories, diff, apiKey, model) {
             lines.push(`i_want: ${s.i_want}`);
         return lines.join('\n');
     }).join('\n\n---\n\n');
-    const userPrompt = `## Stories to audit (${stories.length} total)
+    const userPrompt = `## Stories to audit (${auditable.length} total)
 
 ${storyList}
 
@@ -35754,8 +35784,8 @@ Respond with this exact JSON structure:
   ]
 }
 
-Include ALL ${stories.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
-    core.debug(`Calling ${model} to audit ${stories.length} stories (divergence mode) against PR #${diff.pr_number}`);
+Include ALL ${auditable.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
+    core.debug(`Calling ${model} to audit ${auditable.length} stories (divergence mode) against PR #${diff.pr_number}`);
     const response = await client.messages.create({
         model,
         max_tokens: 8192,
@@ -35784,7 +35814,7 @@ Include ALL ${stories.length} stories. Omit ac_results if the story has no accep
     for (const r of parsed.results) {
         resultMap.set(r.id, r);
     }
-    return stories.map(story => {
+    const auditedResults = auditable.map(story => {
         const r = resultMap.get(story.id);
         if (!r) {
             return {
@@ -35815,15 +35845,29 @@ Include ALL ${stories.length} stories. Omit ac_results if the story has no accep
             acs_total: acTotal > 0 ? acTotal : undefined,
         };
     });
+    // Append skipped stories (deprecated / in-progress / implemented)
+    const skippedResults = skipped.map(story => ({
+        story,
+        status: 'skipped',
+        covered: false,
+        confidence: 'high',
+        evidence: `skipped — story status is '${story.status}'`,
+        files_touched: [],
+    }));
+    return [...auditedResults, ...skippedResults];
 }
 /**
  * Builds the AuditReport from raw story results and action config.
+ * Skipped stories (deprecated / in-progress / implemented) are excluded from
+ * coverage calculations per spec rules 8.1.5 and 8.1.6.
  */
 function buildReport(results, minCoverage, failOnMissing, failOnDivergence) {
-    const total = results.length;
-    const covered = results.filter(r => r.covered).length;
-    const uncovered = results.filter(r => r.status === 'not-covered').length;
-    const diverged = results.filter(r => r.status === 'diverged').length;
+    // Exclude skipped stories from all metrics
+    const audited = results.filter(r => r.status !== 'skipped');
+    const total = audited.length;
+    const covered = audited.filter(r => r.covered).length;
+    const uncovered = audited.filter(r => r.status === 'not-covered').length;
+    const diverged = audited.filter(r => r.status === 'diverged').length;
     const coverage_percent = total === 0 ? 100 : Math.round((covered / total) * 100);
     const coveragePasses = coverage_percent >= minCoverage;
     const missingPasses = !failOnMissing || uncovered === 0;
@@ -35901,6 +35945,7 @@ function statusIcon(status) {
         case 'partial': return '⚠️';
         case 'not-covered': return '—';
         case 'diverged': return '❌';
+        case 'skipped': return '⏭️';
     }
 }
 /** Short label for story-level status */
@@ -35915,6 +35960,7 @@ function statusLabel(r) {
         }
         case 'not-covered': return 'not covered';
         case 'diverged': return `diverged — ${r.evidence.slice(0, 80)}`;
+        case 'skipped': return `skipped (${r.story.status ?? 'unknown status'})`;
     }
 }
 function storyRow(r) {
@@ -35959,6 +36005,7 @@ function buildCommentBody(report) {
     const partialRows = report.results.filter(r => r.status === 'partial').map(storyRow);
     const satisfiedRows = report.results.filter(r => r.status === 'satisfied').map(storyRow);
     const notCoveredRows = report.results.filter(r => r.status === 'not-covered').map(storyRow);
+    const skippedRows = report.results.filter(r => r.status === 'skipped').map(storyRow);
     let body = `${COMMENT_MARKER}
 ## ${badge(coverage_percent, passed, hasDivergence)} ${headerLine}
 
@@ -35977,8 +36024,12 @@ ${failBlock}`;
         // Collapse not-covered to keep comment clean — use a <details> block
         body += `\n<details>\n<summary>— Not covered by this PR (${notCoveredRows.length})</summary>\n\n${tableHeader}\n${notCoveredRows.join('\n')}\n\n</details>\n`;
     }
+    if (skippedRows.length > 0) {
+        // Collapsed skipped section — deprecated/in-progress/implemented stories excluded from audit
+        body += `\n<details>\n<summary>⏭️ Skipped (${skippedRows.length}) — deprecated, in-progress, or already implemented</summary>\n\n${tableHeader}\n${skippedRows.join('\n')}\n\n</details>\n`;
+    }
     const coverageLine = `Coverage: ${covered}/${total} stories (${coverage_percent}%)`;
-    body += `\n---\n<sub>${coverageLine} · Powered by [Locus](https://prototyper.app) · [stories.yaml spec](https://github.com/jonybur/prototyper)</sub>`;
+    body += `\n---\n<sub>${coverageLine} · Powered by [Locus](https://prototyper.app) · [stories.yaml spec](https://github.com/jonybur/locus)</sub>`;
     return body;
 }
 /**
@@ -36236,12 +36287,17 @@ async function run() {
     if (divergedIds.length > 0) {
         core.warning(`⚠️  Diverged stories: ${divergedIds.join(', ')}`);
     }
-    core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total}) — ${report.diverged} diverged`);
-    // 5. Set outputs
+    const skippedIds = auditResults.filter(r => r.status === 'skipped').map(r => r.story.id);
+    if (skippedIds.length > 0) {
+        core.info(`⏭️  Skipped (deprecated/in-progress/implemented): ${skippedIds.join(', ')}`);
+    }
+    core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total}) — ${report.diverged} diverged, ${skippedIds.length} skipped`);
+    // 5. Set outputs (exclude skipped from covered/missing outputs)
     core.setOutput('coverage-percent', String(report.coverage_percent));
     core.setOutput('stories-covered', auditResults.filter(r => r.covered).map(r => r.story.id).join(','));
     core.setOutput('stories-missing', auditResults.filter(r => r.status === 'not-covered').map(r => r.story.id).join(','));
     core.setOutput('stories-diverged', divergedIds.join(','));
+    core.setOutput('stories-skipped', skippedIds.join(','));
     core.setOutput('passed', String(report.passed));
     // 6. Post PR comment (unless status-only)
     if (!inputs.statusOnly) {

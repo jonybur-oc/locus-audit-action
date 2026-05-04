@@ -16,6 +16,7 @@ function statusIcon(status: StoryAuditResult['status']): string {
     case 'partial':     return '⚠️';
     case 'not-covered': return '—';
     case 'diverged':    return '❌';
+    case 'skipped':     return '⏭️';
   }
 }
 
@@ -31,6 +32,7 @@ function statusLabel(r: StoryAuditResult): string {
     }
     case 'not-covered': return 'not covered';
     case 'diverged':    return `diverged — ${r.evidence.slice(0, 80)}`;
+    case 'skipped':     return `skipped (${r.story.status ?? 'unknown status'})`;
   }
 }
 
@@ -84,6 +86,7 @@ export function buildCommentBody(report: AuditReport): string {
   const partialRows    = report.results.filter(r => r.status === 'partial').map(storyRow);
   const satisfiedRows  = report.results.filter(r => r.status === 'satisfied').map(storyRow);
   const notCoveredRows = report.results.filter(r => r.status === 'not-covered').map(storyRow);
+  const skippedRows    = report.results.filter(r => r.status === 'skipped').map(storyRow);
 
   let body = `${COMMENT_MARKER}
 ## ${badge(coverage_percent, passed, hasDivergence)} ${headerLine}
@@ -106,6 +109,11 @@ ${failBlock}`;
   if (notCoveredRows.length > 0) {
     // Collapse not-covered to keep comment clean — use a <details> block
     body += `\n<details>\n<summary>— Not covered by this PR (${notCoveredRows.length})</summary>\n\n${tableHeader}\n${notCoveredRows.join('\n')}\n\n</details>\n`;
+  }
+
+  if (skippedRows.length > 0) {
+    // Collapsed skipped section — deprecated/in-progress/implemented stories excluded from audit
+    body += `\n<details>\n<summary>⏭️ Skipped (${skippedRows.length}) — deprecated, in-progress, or already implemented</summary>\n\n${tableHeader}\n${skippedRows.join('\n')}\n\n</details>\n`;
   }
 
   const coverageLine = `Coverage: ${covered}/${total} stories (${coverage_percent}%)`;

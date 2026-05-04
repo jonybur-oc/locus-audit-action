@@ -55,6 +55,8 @@ outputs:
     description: 'Comma-separated list of uncovered story IDs'
   stories-diverged:
     description: 'Comma-separated list of story IDs that diverged from spec'
+  stories-skipped:
+    description: 'Comma-separated list of story IDs skipped from audit (deprecated, in-progress, or implemented)'
   passed:
     description: 'Whether the audit passed (true/false)'
 

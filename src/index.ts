@@ -97,13 +97,19 @@ async function run(): Promise<void> {
     core.warning(`⚠️  Diverged stories: ${divergedIds.join(', ')}`);
   }
 
-  core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total}) — ${report.diverged} diverged`);
+  const skippedIds = auditResults.filter(r => r.status === 'skipped').map(r => r.story.id);
+  if (skippedIds.length > 0) {
+    core.info(`⏭️  Skipped (deprecated/in-progress/implemented): ${skippedIds.join(', ')}`);
+  }
 
-  // 5. Set outputs
+  core.info(`📊 Coverage: ${report.coverage_percent}% (${report.covered}/${report.total}) — ${report.diverged} diverged, ${skippedIds.length} skipped`);
+
+  // 5. Set outputs (exclude skipped from covered/missing outputs)
   core.setOutput('coverage-percent', String(report.coverage_percent));
   core.setOutput('stories-covered', auditResults.filter(r => r.covered).map(r => r.story.id).join(','));
   core.setOutput('stories-missing', auditResults.filter(r => r.status === 'not-covered').map(r => r.story.id).join(','));
   core.setOutput('stories-diverged', divergedIds.join(','));
+  core.setOutput('stories-skipped', skippedIds.join(','));
   core.setOutput('passed', String(report.passed));
 
   // 6. Post PR comment (unless status-only)

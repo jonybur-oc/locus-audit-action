@@ -40,7 +40,23 @@ interface ClaudeAuditResponse {
 }
 
 /**
+ * Status values that should be excluded from the Claude audit.
+ *
+ * - 'deprecated': spec rule 8.1.5 — audit tools MUST NOT flag deprecated stories
+ *   as diverged or uncovered. Excluded entirely.
+ * - 'in-progress': set by humans to signal active development. Sending to Claude
+ *   is noise — the code is intentionally incomplete. Excluded from coverage calc.
+ * - 'implemented': already done; skip unless the PR could regress it (future work).
+ *
+ * Stories with these statuses are returned as 'skipped' results so the comment
+ * can display them in a separate collapsed section.
+ */
+const SKIP_STATUSES = new Set(['deprecated', 'in-progress', 'implemented']);
+
+/**
  * Calls Claude to audit divergence and coverage for all stories against the PR diff.
+ * Stories with skip-statuses (deprecated, in-progress, implemented) are excluded
+ * from the Claude call and returned with status='skipped'.
  */
 export async function auditStoriesWithClaude(
   stories: Story[],
@@ -50,8 +66,26 @@ export async function auditStoriesWithClaude(
 ): Promise<StoryAuditResult[]> {
   const client = new Anthropic({ apiKey });
 
+  // Split stories into auditable vs skipped
+  const auditable = stories.filter(s => !SKIP_STATUSES.has(s.status ?? ''));
+  const skipped   = stories.filter(s => SKIP_STATUSES.has(s.status ?? ''));
+
+  core.debug(`Auditing ${auditable.length} stories; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
+
+  // Return early if nothing to audit
+  if (auditable.length === 0) {
+    return skipped.map(story => ({
+      story,
+      status: 'skipped' as const,
+      covered: false,
+      confidence: 'high' as const,
+      evidence: `skipped — story status is '${story.status}'`,
+      files_touched: [],
+    }));
+  }
+
   // Build a compact story list for the prompt
-  const storyList = stories.map(s => {
+  const storyList = auditable.map(s => {
     const lines: string[] = [`id: ${s.id}`, `title: ${s.title}`];
     if (s.description) lines.push(`description: ${s.description.slice(0, 200)}`);
     if (s.acceptance_criteria?.length) {
@@ -62,7 +96,7 @@ export async function auditStoriesWithClaude(
     return lines.join('\n');
   }).join('\n\n---\n\n');
 
-  const userPrompt = `## Stories to audit (${stories.length} total)
+  const userPrompt = `## Stories to audit (${auditable.length} total)
 
 ${storyList}
 
@@ -97,9 +131,9 @@ Respond with this exact JSON structure:
   ]
 }
 
-Include ALL ${stories.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
+Include ALL ${auditable.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
 
-  core.debug(`Calling ${model} to audit ${stories.length} stories (divergence mode) against PR #${diff.pr_number}`);
+  core.debug(`Calling ${model} to audit ${auditable.length} stories (divergence mode) against PR #${diff.pr_number}`);
 
   const response = await client.messages.create({
     model,
@@ -133,7 +167,7 @@ Include ALL ${stories.length} stories. Omit ac_results if the story has no accep
     resultMap.set(r.id, r);
   }
 
-  return stories.map(story => {
+  const auditedResults = auditable.map(story => {
     const r = resultMap.get(story.id);
     if (!r) {
       return {
@@ -167,10 +201,24 @@ Include ALL ${stories.length} stories. Omit ac_results if the story has no accep
       acs_total: acTotal > 0 ? acTotal : undefined,
     };
   });
+
+  // Append skipped stories (deprecated / in-progress / implemented)
+  const skippedResults: StoryAuditResult[] = skipped.map(story => ({
+    story,
+    status: 'skipped' as const,
+    covered: false,
+    confidence: 'high' as const,
+    evidence: `skipped — story status is '${story.status}'`,
+    files_touched: [],
+  }));
+
+  return [...auditedResults, ...skippedResults];
 }
 
 /**
  * Builds the AuditReport from raw story results and action config.
+ * Skipped stories (deprecated / in-progress / implemented) are excluded from
+ * coverage calculations per spec rules 8.1.5 and 8.1.6.
  */
 export function buildReport(
   results: StoryAuditResult[],
@@ -178,10 +226,12 @@ export function buildReport(
   failOnMissing: boolean,
   failOnDivergence: boolean
 ): AuditReport {
-  const total = results.length;
-  const covered = results.filter(r => r.covered).length;
-  const uncovered = results.filter(r => r.status === 'not-covered').length;
-  const diverged = results.filter(r => r.status === 'diverged').length;
+  // Exclude skipped stories from all metrics
+  const audited = results.filter(r => r.status !== 'skipped');
+  const total = audited.length;
+  const covered = audited.filter(r => r.covered).length;
+  const uncovered = audited.filter(r => r.status === 'not-covered').length;
+  const diverged = audited.filter(r => r.status === 'diverged').length;
   const coverage_percent = total === 0 ? 100 : Math.round((covered / total) * 100);
 
   const coveragePasses = coverage_percent >= minCoverage;

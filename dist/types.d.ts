@@ -28,14 +28,15 @@ export interface AcResult {
 /**
  * Per-story result from divergence audit.
  * status:
- *   satisfied  — all ACs covered by this PR
- *   partial    — some ACs covered, none diverged
+ *   satisfied   — all ACs covered by this PR
+ *   partial     — some ACs covered, none diverged
  *   not-covered — diff doesn't touch this story
- *   diverged   — diff actively contradicts at least one AC
+ *   diverged    — diff actively contradicts at least one AC
+ *   skipped     — excluded from audit (deprecated / in-progress / implemented)
  */
 export interface StoryAuditResult {
     story: Story;
-    status: 'satisfied' | 'partial' | 'not-covered' | 'diverged';
+    status: 'satisfied' | 'partial' | 'not-covered' | 'diverged' | 'skipped';
     /** Backward-compat alias: true when status === 'satisfied' or 'partial' */
     covered: boolean;
     confidence: 'high' | 'medium' | 'low';
