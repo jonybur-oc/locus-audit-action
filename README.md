@@ -1,4 +1,4 @@
-# locus/audit@v1
+# Locus Story Coverage Audit
 
 > GitHub Action: Locus story divergence & coverage audit for pull requests
 
@@ -11,7 +11,7 @@ Reads `stories.yaml` from your repo, fetches the PR diff, calls Claude to check 
 ## Usage
 
 ```yaml
-- uses: locus-dev/audit@v1
+- uses: jonybur-oc/locus-audit-action@v1
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: locus-dev/audit@v1
+      - uses: jonybur-oc/locus-audit-action@v1
         with:
           stories-path: stories.yaml
           fail-on-divergence: false   # informational by default
@@ -113,7 +113,7 @@ Coverage: 21/23 stories (91%)
 **Informational (default)** — posts the report but never blocks the PR. Low-friction adoption.
 
 ```yaml
-- uses: locus-dev/audit@v1
+- uses: jonybur-oc/locus-audit-action@v1
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     fail-on-divergence: false
@@ -122,7 +122,7 @@ Coverage: 21/23 stories (91%)
 **Enforced (opt-in)** — blocks the PR when stories diverge. For compliance teams.
 
 ```yaml
-- uses: locus-dev/audit@v1
+- uses: jonybur-oc/locus-audit-action@v1
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     fail-on-divergence: true
@@ -170,7 +170,7 @@ For most repos with ≤20 stories, Haiku is accurate enough. Use Sonnet for crit
 
 Built on top of [Locus](https://prototyper.app) — the stories.yaml standard for AI-native product teams.
 
-Issues: [github.com/locus-dev/audit](https://github.com/locus-dev/audit/issues)  
+Issues: [github.com/jonybur-oc/locus-audit-action](https://github.com/jonybur-oc/locus-audit-action/issues)  
 Spec: [github.com/jonybur/prototyper](https://github.com/jonybur/prototyper)
 
 ---
