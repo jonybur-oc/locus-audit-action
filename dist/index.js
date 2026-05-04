@@ -36227,7 +36227,7 @@ async function run() {
         minCoverage: parseInt(core.getInput('min-coverage') || '0', 10),
         failOnMissing: core.getInput('fail-on-missing') === 'true',
         failOnDivergence: core.getInput('fail-on-divergence') === 'true',
-        anthropicApiKey: core.getInput('anthropic-api-key', { required: true }),
+        anthropicApiKey: core.getInput('anthropic-api-key') || '',
         githubToken: core.getInput('github-token') || process.env.GITHUB_TOKEN || '',
         model: core.getInput('model') || 'claude-haiku-4-5',
         statusOnly: core.getInput('status-only') === 'true',
@@ -36237,6 +36237,17 @@ async function run() {
     core.debug(`fail-on-missing: ${inputs.failOnMissing}`);
     core.debug(`fail-on-divergence: ${inputs.failOnDivergence}`);
     core.debug(`model: ${inputs.model}`);
+    // Early exit: no API key — skip audit gracefully
+    if (!inputs.anthropicApiKey) {
+        core.warning('⚠️  No ANTHROPIC_API_KEY provided — Locus story audit skipped. Add the secret to enable AI-powered coverage analysis.');
+        core.setOutput('coverage-percent', '0');
+        core.setOutput('stories-covered', '');
+        core.setOutput('stories-missing', '');
+        core.setOutput('stories-diverged', '');
+        core.setOutput('stories-skipped', '');
+        core.setOutput('passed', 'true');
+        return;
+    }
     // 1. Parse stories.yaml
     core.info(`📖 Reading stories from ${inputs.storiesPath}`);
     let stories;

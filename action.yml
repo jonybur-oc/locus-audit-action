@@ -28,8 +28,9 @@ inputs:
     default: 'false'
 
   anthropic-api-key:
-    description: 'Anthropic API key for Claude story coverage analysis'
-    required: true
+    description: 'Anthropic API key for Claude story coverage analysis. If not provided, the audit is skipped and the check passes informatively.'
+    required: false
+    default: ''
 
   github-token:
     description: 'GitHub token for posting PR comments'
