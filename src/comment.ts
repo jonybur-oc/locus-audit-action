@@ -43,7 +43,7 @@ function storyRow(r: StoryAuditResult): string {
   const files = r.files_touched.length > 0
     ? `<br><sub>${r.files_touched.slice(0, 3).join(', ')}${r.files_touched.length > 3 ? ` +${r.files_touched.length - 3} more` : ''}</sub>`
     : '';
-  return `| ${icon} | \`${r.story.id}\` | ${r.story.title}${conf} | ${label}${files} |`;
+  return `| ${icon} | \`${r.story.story_id}\` | ${r.story.title}${conf} | ${label}${files} |`;
 }
 
 export function buildCommentBody(report: AuditReport): string {

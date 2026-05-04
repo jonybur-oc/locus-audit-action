@@ -27,7 +27,7 @@ interface ClaudeAcResult {
 }
 
 interface ClaudeStoryResult {
-  id: string;
+  story_id: string;
   status: 'satisfied' | 'partial' | 'not-covered' | 'diverged';
   confidence: 'high' | 'medium' | 'low';
   evidence: string;
@@ -86,7 +86,7 @@ export async function auditStoriesWithClaude(
 
   // Build a compact story list for the prompt
   const storyList = auditable.map(s => {
-    const lines: string[] = [`id: ${s.id}`, `title: ${s.title}`];
+    const lines: string[] = [`story_id: ${s.story_id}`, `title: ${s.title}`];
     if (s.description) lines.push(`description: ${s.description.slice(0, 200)}`);
     if (s.acceptance_criteria?.length) {
       lines.push(`acceptance_criteria:\n${s.acceptance_criteria.map(ac => `  - ${ac}`).join('\n')}`);
@@ -115,7 +115,7 @@ Respond with this exact JSON structure:
 {
   "results": [
     {
-      "id": "US-01",
+      "story_id": "US-01",
       "status": "satisfied",
       "confidence": "high",
       "evidence": "LoginForm.tsx implements email+password fields and token storage as described",
@@ -162,13 +162,14 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
   }
 
   // Map results back to Story objects, filling in any stories Claude missed
+  // Accept both story_id (canonical) and id (legacy) in Claude responses
   const resultMap = new Map<string, ClaudeStoryResult>();
   for (const r of parsed.results) {
-    resultMap.set(r.id, r);
+    resultMap.set(r.story_id, r);
   }
 
   const auditedResults = auditable.map(story => {
-    const r = resultMap.get(story.id);
+    const r = resultMap.get(story.story_id);
     if (!r) {
       return {
         story,

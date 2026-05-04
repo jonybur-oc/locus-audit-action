@@ -1,5 +1,11 @@
 export interface Story {
-  id: string;
+  /**
+   * story_id is the canonical human-readable identifier per the Locus spec v1.x.
+   * The id field (UUID v4) is the stable cross-tool reference.
+   * parse-stories.ts normalises both: story_id takes precedence; id is kept for UUID usage.
+   */
+  story_id: string;   // canonical — human-readable e.g. BT-01, US-03
+  id?: string;        // optional UUID v4 — stable cross-system reference
   title: string;
   description?: string;
   status?: string;

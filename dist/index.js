@@ -35737,7 +35737,7 @@ async function auditStoriesWithClaude(stories, diff, apiKey, model) {
     }
     // Build a compact story list for the prompt
     const storyList = auditable.map(s => {
-        const lines = [`id: ${s.id}`, `title: ${s.title}`];
+        const lines = [`story_id: ${s.story_id}`, `title: ${s.title}`];
         if (s.description)
             lines.push(`description: ${s.description.slice(0, 200)}`);
         if (s.acceptance_criteria?.length) {
@@ -35768,7 +35768,7 @@ Respond with this exact JSON structure:
 {
   "results": [
     {
-      "id": "US-01",
+      "story_id": "US-01",
       "status": "satisfied",
       "confidence": "high",
       "evidence": "LoginForm.tsx implements email+password fields and token storage as described",
@@ -35810,12 +35810,13 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
         throw new Error(`Claude response missing results array`);
     }
     // Map results back to Story objects, filling in any stories Claude missed
+    // Accept both story_id (canonical) and id (legacy) in Claude responses
     const resultMap = new Map();
     for (const r of parsed.results) {
-        resultMap.set(r.id, r);
+        resultMap.set(r.story_id, r);
     }
     const auditedResults = auditable.map(story => {
-        const r = resultMap.get(story.id);
+        const r = resultMap.get(story.story_id);
         if (!r) {
             return {
                 story,
@@ -35970,7 +35971,7 @@ function storyRow(r) {
     const files = r.files_touched.length > 0
         ? `<br><sub>${r.files_touched.slice(0, 3).join(', ')}${r.files_touched.length > 3 ? ` +${r.files_touched.length - 3} more` : ''}</sub>`
         : '';
-    return `| ${icon} | \`${r.story.id}\` | ${r.story.title}${conf} | ${label}${files} |`;
+    return `| ${icon} | \`${r.story.story_id}\` | ${r.story.title}${conf} | ${label}${files} |`;
 }
 function buildCommentBody(report) {
     const { coverage_percent, covered, total, passed, min_coverage, fail_on_missing, fail_on_divergence, diverged } = report;
@@ -36415,20 +36416,30 @@ function parseStoriesFile(storiesPath) {
     else {
         throw new Error(`unrecognised stories.yaml format — expected array or {stories: [...]} envelope`);
     }
-    // Validate that each story has at minimum an id and title
+    // Normalise: ensure story_id is set (canonical Locus spec field).
+    // The spec uses story_id as the human-readable identifier; id is the optional UUID v4.
+    // Tolerate legacy files that use id for the human-readable string.
     const valid = [];
     for (const s of stories) {
-        // Support story_id (canonical Locus spec field) as alias for id
         const raw = s;
-        if (!s.id && raw.story_id) {
-            s.id = raw.story_id;
+        // Canonical: story_id present — use it directly
+        // Legacy: only id present and looks like a human-readable slug (not UUID v4) — promote to story_id
+        if (!raw.story_id && raw.id && typeof raw.id === 'string') {
+            const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+            if (!uuidPattern.test(raw.id)) {
+                // Looks like a human-readable id (e.g. US-01, BT-07) — promote to story_id
+                raw.story_id = raw.id;
+            }
         }
-        if (!s.id && !s.title) {
-            continue; // skip entirely blank entries
+        // Auto-generate story_id from title slug if both id and story_id are missing
+        if (!raw.story_id && !raw.id) {
+            if (!s.title) {
+                continue; // skip entirely blank entries
+            }
+            raw.story_id = s.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         }
-        if (!s.id) {
-            // auto-assign from title slug if missing (tolerant parsing)
-            s.id = s.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        if (!raw.story_id && !s.title) {
+            continue; // still nothing useful — skip
         }
         valid.push(s);
     }

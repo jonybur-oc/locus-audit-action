@@ -34,23 +34,36 @@ export function parseStoriesFile(storiesPath: string): Story[] {
     throw new Error(`unrecognised stories.yaml format — expected array or {stories: [...]} envelope`);
   }
 
-  // Validate that each story has at minimum an id and title
+  // Normalise: ensure story_id is set (canonical Locus spec field).
+  // The spec uses story_id as the human-readable identifier; id is the optional UUID v4.
+  // Tolerate legacy files that use id for the human-readable string.
   const valid: Story[] = [];
   for (const s of stories) {
-    // Support story_id (canonical Locus spec field) as alias for id
-    const raw = s as Story & { story_id?: string };
-    if (!s.id && raw.story_id) {
-      s.id = raw.story_id;
+    const raw = s as unknown as Record<string, unknown>;
+
+    // Canonical: story_id present — use it directly
+    // Legacy: only id present and looks like a human-readable slug (not UUID v4) — promote to story_id
+    if (!raw.story_id && raw.id && typeof raw.id === 'string') {
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(raw.id as string)) {
+        // Looks like a human-readable id (e.g. US-01, BT-07) — promote to story_id
+        raw.story_id = raw.id;
+      }
     }
 
-    if (!s.id && !s.title) {
-      continue; // skip entirely blank entries
+    // Auto-generate story_id from title slug if both id and story_id are missing
+    if (!raw.story_id && !raw.id) {
+      if (!s.title) {
+        continue; // skip entirely blank entries
+      }
+      raw.story_id = s.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     }
-    if (!s.id) {
-      // auto-assign from title slug if missing (tolerant parsing)
-      s.id = s.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+    if (!raw.story_id && !s.title) {
+      continue; // still nothing useful — skip
     }
-    valid.push(s);
+
+    valid.push(s as Story);
   }
 
   return valid;
