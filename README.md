@@ -133,7 +133,7 @@ Coverage: 21/23 stories (91%)
 
 ## The stories.yaml format
 
-This action reads the [Locus stories.yaml spec](https://github.com/jonybur/prototyper). 
+This action reads the [Locus stories.yaml spec](https://github.com/jonybur/locus). 
 Both v1.0 (basic) and v1.1 (with acceptance_criteria, depends_on, design_ref, test_refs) are supported.
 
 Minimal example:
@@ -152,7 +152,7 @@ Minimal example:
   status: not-implemented
 ```
 
-Full spec: [locus spec v1.1](https://github.com/jonybur/prototyper/blob/main/docs/specification/locus-spec-v1.0.md)
+Full spec: [locus spec v1.1](https://github.com/jonybur/locus/blob/main/docs/specification/locus-spec-v1.0.md)
 
 ---
 
@@ -171,7 +171,7 @@ For most repos with ≤20 stories, Haiku is accurate enough. Use Sonnet for crit
 Built on top of [Locus](https://prototyper.app) — the stories.yaml standard for AI-native product teams.
 
 Issues: [github.com/jonybur-oc/locus-audit-action](https://github.com/jonybur-oc/locus-audit-action/issues)  
-Spec: [github.com/jonybur/prototyper](https://github.com/jonybur/prototyper)
+Spec: [github.com/jonybur/locus](https://github.com/jonybur/locus)
 
 ---
 

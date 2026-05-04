@@ -109,7 +109,7 @@ ${failBlock}`;
   }
 
   const coverageLine = `Coverage: ${covered}/${total} stories (${coverage_percent}%)`;
-  body += `\n---\n<sub>${coverageLine} · Powered by [Locus](https://prototyper.app) · [stories.yaml spec](https://github.com/jonybur/prototyper)</sub>`;
+  body += `\n---\n<sub>${coverageLine} · Powered by [Locus](https://prototyper.app) · [stories.yaml spec](https://github.com/jonybur/locus)</sub>`;
 
   return body;
 }
