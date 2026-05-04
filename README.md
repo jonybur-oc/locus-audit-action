@@ -1,8 +1,8 @@
 # Locus Story Coverage Audit
 
-> GitHub Action: Locus story divergence & coverage audit for pull requests
+> CI enforcement for your product specification. Fails the build if code diverges from the spec.
 
-Reads `stories.yaml` from your repo, fetches the PR diff, calls Claude to check which stories are satisfied, partial, or **diverged**, and posts a structured report as a PR comment.
+Reads `stories.yaml` — your single source of truth for product requirements — fetches the PR diff, checks which stories are satisfied, partial, or **diverged**, and posts a structured report as a PR comment. Like a test suite, but for what the product is supposed to do.
 
 ![Locus Coverage](https://img.shields.io/badge/story%20coverage-87%25-brightgreen)
 
