@@ -43,7 +43,11 @@ function storyRow(r: StoryAuditResult): string {
   const files = r.files_touched.length > 0
     ? `<br><sub>${r.files_touched.slice(0, 3).join(', ')}${r.files_touched.length > 3 ? ` +${r.files_touched.length - 3} more` : ''}</sub>`
     : '';
-  return `| ${icon} | \`${r.story.story_id}\` | ${r.story.title}${conf} | ${label}${files} |`;
+  // Tag deterministic results so users know they came from test_refs, not Claude
+  const trTag = r.test_refs_result && r.evidence.startsWith('[deterministic]')
+    ? ' `test_refs`'
+    : '';
+  return `| ${icon} | \`${r.story.story_id}\`${trTag} | ${r.story.title}${conf} | ${label}${files} |`;
 }
 
 export function buildCommentBody(report: AuditReport): string {

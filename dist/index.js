@@ -35717,16 +35717,80 @@ const SKIP_STATUSES = new Set(['deprecated', 'in-progress', 'implemented']);
  * Calls Claude to audit divergence and coverage for all stories against the PR diff.
  * Stories with skip-statuses (deprecated, in-progress, implemented) are excluded
  * from the Claude call and returned with status='skipped'.
+ *
+ * @param testRefsResults Optional map from story_id → TestRefsResult from deterministic audit.
+ *   When present, stories with deterministic pass/fail verdicts are resolved without Claude.
+ *   Stories with 'missing-files' verdict get status='not-covered' (deterministic override).
+ *   Stories with 'inconclusive' verdict still go through Claude but include test_refs context.
  */
-async function auditStoriesWithClaude(stories, diff, apiKey, model) {
+async function auditStoriesWithClaude(stories, diff, apiKey, model, testRefsResults) {
     const client = new sdk_1.default({ apiKey });
     // Split stories into auditable vs skipped
     const auditable = stories.filter(s => !SKIP_STATUSES.has(s.status ?? ''));
     const skipped = stories.filter(s => SKIP_STATUSES.has(s.status ?? ''));
-    core.debug(`Auditing ${auditable.length} stories; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
-    // Return early if nothing to audit
-    if (auditable.length === 0) {
-        return skipped.map(story => ({
+    // ── Deterministic test_refs pre-pass ──────────────────────────────────────
+    // Resolve stories that have definitive test_refs verdicts before calling Claude.
+    const deterministicResults = [];
+    const needsClaudeAudit = [];
+    for (const story of auditable) {
+        const tr = testRefsResults?.get(story.story_id);
+        if (!tr || tr.verdict === 'no-test-refs') {
+            // No test_refs — Claude handles it
+            needsClaudeAudit.push(story);
+            continue;
+        }
+        if (tr.verdict === 'pass') {
+            // Definitive: test_refs files exist AND tests passed → satisfied
+            deterministicResults.push({
+                story,
+                status: 'satisfied',
+                covered: true,
+                confidence: 'high',
+                evidence: `[deterministic] ${tr.evidence}`,
+                files_touched: tr.refs.map(r => r.file),
+                test_refs_result: tr,
+            });
+            core.debug(`${story.story_id}: deterministic pass (test_refs)`);
+        }
+        else if (tr.verdict === 'fail') {
+            // Definitive: test output present and tests failed → diverged
+            deterministicResults.push({
+                story,
+                status: 'diverged',
+                covered: false,
+                confidence: 'high',
+                evidence: `[deterministic] ${tr.evidence}`,
+                files_touched: tr.refs.map(r => r.file),
+                test_refs_result: tr,
+            });
+            core.debug(`${story.story_id}: deterministic fail (test_refs)`);
+        }
+        else if (tr.verdict === 'missing-files') {
+            // Definitive: referenced test files don't exist → not-covered
+            deterministicResults.push({
+                story,
+                status: 'not-covered',
+                covered: false,
+                confidence: 'high',
+                evidence: `[deterministic] ${tr.evidence}`,
+                files_touched: [],
+                test_refs_result: tr,
+            });
+            core.debug(`${story.story_id}: deterministic missing-files (test_refs)`);
+        }
+        else {
+            // 'inconclusive' — files exist but no test output. Pass to Claude with extra context.
+            needsClaudeAudit.push(story);
+        }
+    }
+    if (deterministicResults.length > 0) {
+        core.info(`🔬 ${deterministicResults.length} ${deterministicResults.length === 1 ? 'story' : 'stories'} resolved deterministically via test_refs — ` +
+            `${needsClaudeAudit.length} sent to Claude`);
+    }
+    core.debug(`Auditing ${needsClaudeAudit.length} stories via Claude; ${deterministicResults.length} resolved deterministically; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
+    // Return early if nothing to audit via Claude
+    if (needsClaudeAudit.length === 0) {
+        const skippedResults = skipped.map(story => ({
             story,
             status: 'skipped',
             covered: false,
@@ -35734,9 +35798,10 @@ async function auditStoriesWithClaude(stories, diff, apiKey, model) {
             evidence: `skipped — story status is '${story.status}'`,
             files_touched: [],
         }));
+        return [...deterministicResults, ...skippedResults];
     }
     // Build a compact story list for the prompt
-    const storyList = auditable.map(s => {
+    const storyList = needsClaudeAudit.map(s => {
         const lines = [`story_id: ${s.story_id}`, `title: ${s.title}`];
         if (s.description)
             lines.push(`description: ${s.description.slice(0, 200)}`);
@@ -35749,10 +35814,20 @@ async function auditStoriesWithClaude(stories, diff, apiKey, model) {
             lines.push(`i_want: ${s.i_want}`);
         return lines.join('\n');
     }).join('\n\n---\n\n');
-    const userPrompt = `## Stories to audit (${auditable.length} total)
+    // Annotate stories with inconclusive test_refs context so Claude can use it
+    const inconclusiveContext = needsClaudeAudit
+        .filter(s => testRefsResults?.get(s.story_id)?.verdict === 'inconclusive')
+        .map(s => {
+        const tr = testRefsResults.get(s.story_id);
+        return `${s.story_id}: test_refs files exist (${tr.refs.map(r => r.file).join(', ')}) but no test output to confirm pass/fail`;
+    });
+    const inconclusiveNote = inconclusiveContext.length > 0
+        ? `\n## test_refs context (deterministic file check)\n${inconclusiveContext.join('\n')}\n`
+        : '';
+    const userPrompt = `## Stories to audit (${needsClaudeAudit.length} total)
 
 ${storyList}
-
+${inconclusiveNote}
 ## PR Diff (PR #${diff.pr_number})
 
 Files changed: ${diff.files.map(f => f.filename).join(', ')}
@@ -35784,8 +35859,8 @@ Respond with this exact JSON structure:
   ]
 }
 
-Include ALL ${auditable.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
-    core.debug(`Calling ${model} to audit ${auditable.length} stories (divergence mode) against PR #${diff.pr_number}`);
+Include ALL ${needsClaudeAudit.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
+    core.debug(`Calling ${model} to audit ${needsClaudeAudit.length} stories (divergence mode) against PR #${diff.pr_number}`);
     const response = await client.messages.create({
         model,
         max_tokens: 8192,
@@ -35815,7 +35890,7 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
     for (const r of parsed.results) {
         resultMap.set(r.story_id, r);
     }
-    const auditedResults = auditable.map(story => {
+    const auditedResults = needsClaudeAudit.map(story => {
         const r = resultMap.get(story.story_id);
         if (!r) {
             return {
@@ -35834,6 +35909,8 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
         }));
         const acTotal = acResults?.length ?? 0;
         const acSatisfied = acResults?.filter(ac => ac.status === 'satisfied').length ?? 0;
+        // Attach test_refs_result for inconclusive stories (files exist, no test output)
+        const tr = testRefsResults?.get(story.story_id);
         return {
             story,
             status: r.status,
@@ -35844,6 +35921,7 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
             ac_results: acResults,
             acs_satisfied: acTotal > 0 ? acSatisfied : undefined,
             acs_total: acTotal > 0 ? acTotal : undefined,
+            test_refs_result: tr?.verdict === 'inconclusive' ? tr : undefined,
         };
     });
     // Append skipped stories (deprecated / in-progress / implemented)
@@ -35855,7 +35933,8 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
         evidence: `skipped — story status is '${story.status}'`,
         files_touched: [],
     }));
-    return [...auditedResults, ...skippedResults];
+    // Merge: deterministic results first, then Claude-audited, then skipped
+    return [...deterministicResults, ...auditedResults, ...skippedResults];
 }
 /**
  * Builds the AuditReport from raw story results and action config.
@@ -35971,7 +36050,11 @@ function storyRow(r) {
     const files = r.files_touched.length > 0
         ? `<br><sub>${r.files_touched.slice(0, 3).join(', ')}${r.files_touched.length > 3 ? ` +${r.files_touched.length - 3} more` : ''}</sub>`
         : '';
-    return `| ${icon} | \`${r.story.story_id}\` | ${r.story.title}${conf} | ${label}${files} |`;
+    // Tag deterministic results so users know they came from test_refs, not Claude
+    const trTag = r.test_refs_result && r.evidence.startsWith('[deterministic]')
+        ? ' `test_refs`'
+        : '';
+    return `| ${icon} | \`${r.story.story_id}\`${trTag} | ${r.story.title}${conf} | ${label}${files} |`;
 }
 function buildCommentBody(report) {
     const { coverage_percent, covered, total, passed, min_coverage, fail_on_missing, fail_on_divergence, diverged } = report;
@@ -36222,6 +36305,7 @@ const parse_stories_1 = __nccwpck_require__(504);
 const get_diff_1 = __nccwpck_require__(3583);
 const audit_1 = __nccwpck_require__(1748);
 const comment_1 = __nccwpck_require__(2246);
+const test_refs_audit_1 = __nccwpck_require__(4);
 async function run() {
     const inputs = {
         storiesPath: core.getInput('stories-path') || 'stories.yaml',
@@ -36232,6 +36316,7 @@ async function run() {
         githubToken: core.getInput('github-token') || process.env.GITHUB_TOKEN || '',
         model: core.getInput('model') || 'claude-haiku-4-5',
         statusOnly: core.getInput('status-only') === 'true',
+        testOutputPath: core.getInput('test-output-path') || undefined,
     };
     core.debug(`stories-path: ${inputs.storiesPath}`);
     core.debug(`min-coverage: ${inputs.minCoverage}`);
@@ -36283,11 +36368,22 @@ async function run() {
     if (diff.files.length === 0) {
         core.warning('PR has no file changes — coverage is 0%');
     }
-    // 3. Audit with Claude (divergence + coverage)
+    // 3a. Deterministic test_refs audit (VON-101)
+    core.info('🔬 Running deterministic test_refs check...');
+    let testRefsResults;
+    try {
+        testRefsResults = await (0, test_refs_audit_1.auditAllTestRefs)(stories, inputs.githubToken, diff.head_sha, inputs.testOutputPath);
+    }
+    catch (err) {
+        // Non-fatal — warn and fall through to Claude-only audit
+        core.warning(`test_refs audit failed (non-fatal): ${err.message}`);
+        testRefsResults = new Map();
+    }
+    // 3b. Audit with Claude (divergence + coverage) for stories not resolved deterministically
     core.info(`🤖 Auditing with ${inputs.model}...`);
     let auditResults;
     try {
-        auditResults = await (0, audit_1.auditStoriesWithClaude)(stories, diff, inputs.anthropicApiKey, inputs.model);
+        auditResults = await (0, audit_1.auditStoriesWithClaude)(stories, diff, inputs.anthropicApiKey, inputs.model, testRefsResults);
     }
     catch (err) {
         core.setFailed(`Claude audit failed: ${err.message}`);
@@ -36444,6 +36540,329 @@ function parseStoriesFile(storiesPath) {
         valid.push(s);
     }
     return valid;
+}
+
+
+/***/ }),
+
+/***/ 4:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * Deterministic test_refs audit module (VON-101)
+ *
+ * Implements spec §7.11: when a story has test_refs, this module provides
+ * a deterministic (non-AI) assessment of coverage by:
+ *
+ * 1. Checking that referenced test files exist in the repo (at head SHA)
+ * 2. Optionally: scanning jest/cypress JSON test output for [story_id] patterns
+ *    to determine whether tests passed for this story
+ *
+ * The result is combined with Claude's diff analysis in audit.ts:
+ * - If test_refs gives a definitive pass result → set status 'satisfied' with high confidence
+ * - If test_refs files are missing → set status 'not-covered' (deterministic, overrides Claude)
+ * - If test output present but tests failed → set status 'diverged' (overrides Claude)
+ * - Otherwise → fall through to Claude analysis
+ *
+ * Spec reference:
+ * §7.11: "Audit tools SHOULD treat test_refs as the authoritative set of tests for
+ * the story. When test_refs is present and non-empty, an audit tool MAY verify that
+ * the referenced test files exist and that the tests pass."
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.auditStoryTestRefs = auditStoryTestRefs;
+exports.auditAllTestRefs = auditAllTestRefs;
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
+const core = __importStar(__nccwpck_require__(7484));
+const github = __importStar(__nccwpck_require__(3228));
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+/**
+ * Parse a test_ref string into file and optional anchor.
+ * e.g. "cypress/e2e/deposit.spec.ts#BT-07" → { file: "cypress/e2e/deposit.spec.ts", anchor: "BT-07" }
+ */
+function parseTestRef(ref) {
+    const hashIdx = ref.indexOf('#');
+    if (hashIdx === -1) {
+        return { file: ref };
+    }
+    return {
+        file: ref.slice(0, hashIdx),
+        anchor: ref.slice(hashIdx + 1),
+    };
+}
+/**
+ * Recursively collect all test names from a Cypress suite tree.
+ */
+function collectCypressTests(suite) {
+    const tests = [...(suite.tests ?? [])];
+    for (const sub of suite.suites ?? []) {
+        tests.push(...collectCypressTests(sub));
+    }
+    return tests;
+}
+/**
+ * Load and parse test output JSON.
+ * Supports jest JSON reporter format and cypress mochawesome JSON.
+ * Returns null if file not found or parse fails.
+ */
+function loadTestOutput(testOutputPath) {
+    const absPath = path.resolve(process.cwd(), testOutputPath);
+    if (!fs.existsSync(absPath)) {
+        core.debug(`test-output-path not found: ${absPath}`);
+        return null;
+    }
+    try {
+        const raw = fs.readFileSync(absPath, 'utf-8');
+        return JSON.parse(raw);
+    }
+    catch (err) {
+        core.warning(`Failed to parse test output at ${testOutputPath}: ${err.message}`);
+        return null;
+    }
+}
+/**
+ * Check whether a test named matching `[storyId]` exists and passed in jest output.
+ * Returns { found, passed }.
+ */
+function findInJestOutput(output, storyId, filePath) {
+    const pattern = `[${storyId}]`;
+    let found = false;
+    let allPassed = true;
+    for (const fileResult of output.testResults ?? []) {
+        // Optionally filter by file path
+        if (filePath && !fileResult.testFilePath.endsWith(filePath)) {
+            continue;
+        }
+        for (const t of fileResult.testResults ?? []) {
+            if (t.fullName.includes(pattern) || t.title.includes(pattern)) {
+                found = true;
+                if (t.status !== 'passed') {
+                    allPassed = false;
+                }
+            }
+        }
+    }
+    return found ? { found: true, passed: allPassed } : { found: false };
+}
+/**
+ * Check whether a test named matching `[storyId]` exists and passed in Cypress output.
+ */
+function findInCypressOutput(output, storyId) {
+    const pattern = `[${storyId}]`;
+    let found = false;
+    let allPassed = true;
+    const allTests = [];
+    for (const result of output.results ?? []) {
+        for (const suite of result.suites ?? []) {
+            allTests.push(...collectCypressTests(suite));
+        }
+    }
+    for (const t of allTests) {
+        if (t.fullTitle.includes(pattern)) {
+            found = true;
+            if (t.state !== 'passed') {
+                allPassed = false;
+            }
+        }
+    }
+    return found ? { found: true, passed: allPassed } : { found: false };
+}
+// ---------------------------------------------------------------------------
+// Main exports
+// ---------------------------------------------------------------------------
+/**
+ * Check whether files referenced in test_refs exist in the repo at head SHA.
+ * Uses the GitHub contents API (works in CI without a local checkout).
+ * Falls back to local filesystem check (works when running tests locally).
+ */
+async function checkFileExists(file, githubToken, headSha) {
+    // Try local filesystem first (works in local runs and in actions with checkout step)
+    const localPath = path.resolve(process.cwd(), file);
+    if (fs.existsSync(localPath)) {
+        return true;
+    }
+    // Try GitHub contents API
+    try {
+        const octokit = github.getOctokit(githubToken);
+        const context = github.context;
+        await octokit.rest.repos.getContent({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            path: file,
+            ref: headSha,
+        });
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Run the deterministic test_refs audit for a single story.
+ *
+ * @param story         The story to audit
+ * @param githubToken   GitHub token for API calls
+ * @param headSha       HEAD SHA of the PR branch
+ * @param testOutput    Parsed test output (jest or cypress), or null
+ */
+async function auditStoryTestRefs(story, githubToken, headSha, testOutput) {
+    if (!story.test_refs || story.test_refs.length === 0) {
+        return {
+            verdict: 'no-test-refs',
+            refs: [],
+            evidence: 'story has no test_refs',
+        };
+    }
+    const refResults = [];
+    for (const ref of story.test_refs) {
+        const { file, anchor } = parseTestRef(ref);
+        const fileExists = await checkFileExists(file, githubToken, headSha);
+        let testFound;
+        let testPassed;
+        // Anchor is the story_id embedded in the test name (e.g. BT-07)
+        const lookupId = anchor ?? story.story_id;
+        if (testOutput && fileExists) {
+            // Detect format: jest has testResults array with testFilePath;
+            // cypress (mochawesome) has results array with suites
+            const isJest = 'testResults' in testOutput &&
+                Array.isArray(testOutput.testResults) &&
+                testOutput.testResults.length > 0 &&
+                'testFilePath' in (testOutput.testResults[0] ?? {});
+            if (isJest) {
+                const res = findInJestOutput(testOutput, lookupId, file);
+                testFound = res.found;
+                testPassed = res.passed;
+            }
+            else {
+                const res = findInCypressOutput(testOutput, lookupId);
+                testFound = res.found;
+                testPassed = res.passed;
+            }
+        }
+        refResults.push({
+            ref,
+            file,
+            anchor,
+            file_exists: fileExists,
+            test_found: testFound,
+            test_passed: testPassed,
+        });
+    }
+    // Determine verdict
+    const allFilesExist = refResults.every(r => r.file_exists);
+    const anyFileMissing = refResults.some(r => !r.file_exists);
+    const hasTestOutput = refResults.some(r => r.test_found !== undefined);
+    const anyTestFailed = refResults.some(r => r.test_passed === false);
+    const allTestsPassed = hasTestOutput && refResults.every(r => r.test_passed !== false);
+    const anyTestFound = refResults.some(r => r.test_found === true);
+    let verdict;
+    let evidence;
+    if (anyFileMissing) {
+        const missing = refResults.filter(r => !r.file_exists).map(r => r.file).join(', ');
+        verdict = 'missing-files';
+        evidence = `test_refs file(s) not found in repo: ${missing}`;
+    }
+    else if (hasTestOutput && anyTestFailed) {
+        const failed = refResults
+            .filter(r => r.test_passed === false)
+            .map(r => r.anchor ?? story.story_id)
+            .join(', ');
+        verdict = 'fail';
+        evidence = `test(s) failed for [${failed}] in test output`;
+    }
+    else if (hasTestOutput && allTestsPassed && anyTestFound) {
+        verdict = 'pass';
+        const passCount = refResults.filter(r => r.test_passed).length;
+        evidence = `${passCount}/${story.test_refs.length} test_ref(s) verified passing in test output`;
+    }
+    else if (allFilesExist && !hasTestOutput) {
+        verdict = 'inconclusive';
+        const fileList = refResults.map(r => r.file).join(', ');
+        evidence = `test_refs files exist (${fileList}) — no test output to verify pass/fail`;
+    }
+    else {
+        verdict = 'inconclusive';
+        evidence = `test_refs checked — files exist but test name pattern [${story.story_id}] not found in output`;
+    }
+    return {
+        verdict,
+        refs: refResults,
+        evidence,
+    };
+}
+/**
+ * Run test_refs audit for all stories that have test_refs.
+ * Returns a map from story_id → TestRefsResult.
+ */
+async function auditAllTestRefs(stories, githubToken, headSha, testOutputPath) {
+    const storiesWithRefs = stories.filter(s => s.test_refs && s.test_refs.length > 0);
+    if (storiesWithRefs.length === 0) {
+        core.debug('No stories have test_refs — skipping deterministic audit');
+        return new Map();
+    }
+    core.info(`🔬 Running deterministic test_refs audit for ${storiesWithRefs.length} stories with test_refs`);
+    // Load test output once
+    let testOutput = null;
+    if (testOutputPath) {
+        testOutput = loadTestOutput(testOutputPath);
+        if (testOutput) {
+            core.info(`📊 Loaded test output from ${testOutputPath}`);
+        }
+    }
+    const results = new Map();
+    // Run checks in parallel (bounded — GitHub API may rate-limit)
+    const CONCURRENCY = 5;
+    for (let i = 0; i < storiesWithRefs.length; i += CONCURRENCY) {
+        const batch = storiesWithRefs.slice(i, i + CONCURRENCY);
+        const batchResults = await Promise.all(batch.map(story => auditStoryTestRefs(story, githubToken, headSha, testOutput)));
+        for (let j = 0; j < batch.length; j++) {
+            results.set(batch[j].story_id, batchResults[j]);
+        }
+    }
+    const passCount = [...results.values()].filter(r => r.verdict === 'pass').length;
+    const failCount = [...results.values()].filter(r => r.verdict === 'fail').length;
+    const missingCount = [...results.values()].filter(r => r.verdict === 'missing-files').length;
+    const inconclusiveCount = [...results.values()].filter(r => r.verdict === 'inconclusive').length;
+    core.info(`🔬 test_refs audit complete: ${passCount} pass, ${failCount} fail, ${missingCount} missing-files, ${inconclusiveCount} inconclusive`);
+    return results;
 }
 
 

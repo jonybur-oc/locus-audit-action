@@ -56,6 +56,12 @@ export interface StoryAuditResult {
   /** For partial: how many ACs satisfied */
   acs_satisfied?: number;
   acs_total?: number;
+  /**
+   * Result of deterministic test_refs check (VON-101).
+   * Present only when the story has test_refs.
+   * When verdict is 'pass' or 'fail', this overrides or supplements Claude's result.
+   */
+  test_refs_result?: import('./test-refs-audit').TestRefsResult;
 }
 
 export interface AuditReport {
@@ -71,6 +77,12 @@ export interface AuditReport {
   fail_on_divergence: boolean;
 }
 
+/**
+ * Re-export for convenience — full type lives in test-refs-audit.ts
+ * Imported here so StoryAuditResult can reference it without circular deps.
+ */
+export type { TestRefsResult, TestRefsVerdict, TestRefFileResult } from './test-refs-audit';
+
 export interface ActionInputs {
   storiesPath: string;
   minCoverage: number;
@@ -80,4 +92,6 @@ export interface ActionInputs {
   githubToken: string;
   model: string;
   statusOnly: boolean;
+  /** Optional path to jest/cypress JSON test output for deterministic test_refs check */
+  testOutputPath?: string;
 }

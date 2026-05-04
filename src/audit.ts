@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import * as core from '@actions/core';
 import { Story, StoryAuditResult, AuditReport, AcResult } from './types';
 import { PrDiff } from './get-diff';
+import { TestRefsResult } from './test-refs-audit';
 
 const SYSTEM_PROMPT = `You are a story divergence auditor. Given a PR diff and a list of user stories with acceptance criteria, determine:
 
@@ -57,12 +58,18 @@ const SKIP_STATUSES = new Set(['deprecated', 'in-progress', 'implemented']);
  * Calls Claude to audit divergence and coverage for all stories against the PR diff.
  * Stories with skip-statuses (deprecated, in-progress, implemented) are excluded
  * from the Claude call and returned with status='skipped'.
+ *
+ * @param testRefsResults Optional map from story_id → TestRefsResult from deterministic audit.
+ *   When present, stories with deterministic pass/fail verdicts are resolved without Claude.
+ *   Stories with 'missing-files' verdict get status='not-covered' (deterministic override).
+ *   Stories with 'inconclusive' verdict still go through Claude but include test_refs context.
  */
 export async function auditStoriesWithClaude(
   stories: Story[],
   diff: PrDiff,
   apiKey: string,
-  model: string
+  model: string,
+  testRefsResults?: Map<string, TestRefsResult>
 ): Promise<StoryAuditResult[]> {
   const client = new Anthropic({ apiKey });
 
@@ -70,11 +77,74 @@ export async function auditStoriesWithClaude(
   const auditable = stories.filter(s => !SKIP_STATUSES.has(s.status ?? ''));
   const skipped   = stories.filter(s => SKIP_STATUSES.has(s.status ?? ''));
 
-  core.debug(`Auditing ${auditable.length} stories; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
+  // ── Deterministic test_refs pre-pass ──────────────────────────────────────
+  // Resolve stories that have definitive test_refs verdicts before calling Claude.
+  const deterministicResults: StoryAuditResult[] = [];
+  const needsClaudeAudit: Story[] = [];
 
-  // Return early if nothing to audit
-  if (auditable.length === 0) {
-    return skipped.map(story => ({
+  for (const story of auditable) {
+    const tr = testRefsResults?.get(story.story_id);
+
+    if (!tr || tr.verdict === 'no-test-refs') {
+      // No test_refs — Claude handles it
+      needsClaudeAudit.push(story);
+      continue;
+    }
+
+    if (tr.verdict === 'pass') {
+      // Definitive: test_refs files exist AND tests passed → satisfied
+      deterministicResults.push({
+        story,
+        status: 'satisfied',
+        covered: true,
+        confidence: 'high',
+        evidence: `[deterministic] ${tr.evidence}`,
+        files_touched: tr.refs.map(r => r.file),
+        test_refs_result: tr,
+      });
+      core.debug(`${story.story_id}: deterministic pass (test_refs)`);
+    } else if (tr.verdict === 'fail') {
+      // Definitive: test output present and tests failed → diverged
+      deterministicResults.push({
+        story,
+        status: 'diverged',
+        covered: false,
+        confidence: 'high',
+        evidence: `[deterministic] ${tr.evidence}`,
+        files_touched: tr.refs.map(r => r.file),
+        test_refs_result: tr,
+      });
+      core.debug(`${story.story_id}: deterministic fail (test_refs)`);
+    } else if (tr.verdict === 'missing-files') {
+      // Definitive: referenced test files don't exist → not-covered
+      deterministicResults.push({
+        story,
+        status: 'not-covered',
+        covered: false,
+        confidence: 'high',
+        evidence: `[deterministic] ${tr.evidence}`,
+        files_touched: [],
+        test_refs_result: tr,
+      });
+      core.debug(`${story.story_id}: deterministic missing-files (test_refs)`);
+    } else {
+      // 'inconclusive' — files exist but no test output. Pass to Claude with extra context.
+      needsClaudeAudit.push(story);
+    }
+  }
+
+  if (deterministicResults.length > 0) {
+    core.info(
+      `🔬 ${deterministicResults.length} ${deterministicResults.length === 1 ? 'story' : 'stories'} resolved deterministically via test_refs — ` +
+      `${needsClaudeAudit.length} sent to Claude`
+    );
+  }
+
+  core.debug(`Auditing ${needsClaudeAudit.length} stories via Claude; ${deterministicResults.length} resolved deterministically; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
+
+  // Return early if nothing to audit via Claude
+  if (needsClaudeAudit.length === 0) {
+    const skippedResults = skipped.map(story => ({
       story,
       status: 'skipped' as const,
       covered: false,
@@ -82,10 +152,11 @@ export async function auditStoriesWithClaude(
       evidence: `skipped — story status is '${story.status}'`,
       files_touched: [],
     }));
+    return [...deterministicResults, ...skippedResults];
   }
 
   // Build a compact story list for the prompt
-  const storyList = auditable.map(s => {
+  const storyList = needsClaudeAudit.map(s => {
     const lines: string[] = [`story_id: ${s.story_id}`, `title: ${s.title}`];
     if (s.description) lines.push(`description: ${s.description.slice(0, 200)}`);
     if (s.acceptance_criteria?.length) {
@@ -96,10 +167,22 @@ export async function auditStoriesWithClaude(
     return lines.join('\n');
   }).join('\n\n---\n\n');
 
-  const userPrompt = `## Stories to audit (${auditable.length} total)
+  // Annotate stories with inconclusive test_refs context so Claude can use it
+  const inconclusiveContext = needsClaudeAudit
+    .filter(s => testRefsResults?.get(s.story_id)?.verdict === 'inconclusive')
+    .map(s => {
+      const tr = testRefsResults!.get(s.story_id)!;
+      return `${s.story_id}: test_refs files exist (${tr.refs.map(r => r.file).join(', ')}) but no test output to confirm pass/fail`;
+    });
+
+  const inconclusiveNote = inconclusiveContext.length > 0
+    ? `\n## test_refs context (deterministic file check)\n${inconclusiveContext.join('\n')}\n`
+    : '';
+
+  const userPrompt = `## Stories to audit (${needsClaudeAudit.length} total)
 
 ${storyList}
-
+${inconclusiveNote}
 ## PR Diff (PR #${diff.pr_number})
 
 Files changed: ${diff.files.map(f => f.filename).join(', ')}
@@ -131,9 +214,9 @@ Respond with this exact JSON structure:
   ]
 }
 
-Include ALL ${auditable.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
+Include ALL ${needsClaudeAudit.length} stories. Omit ac_results if the story has no acceptance_criteria.`;
 
-  core.debug(`Calling ${model} to audit ${auditable.length} stories (divergence mode) against PR #${diff.pr_number}`);
+  core.debug(`Calling ${model} to audit ${needsClaudeAudit.length} stories (divergence mode) against PR #${diff.pr_number}`);
 
   const response = await client.messages.create({
     model,
@@ -168,7 +251,7 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
     resultMap.set(r.story_id, r);
   }
 
-  const auditedResults = auditable.map(story => {
+  const auditedResults = needsClaudeAudit.map(story => {
     const r = resultMap.get(story.story_id);
     if (!r) {
       return {
@@ -190,6 +273,9 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
     const acTotal = acResults?.length ?? 0;
     const acSatisfied = acResults?.filter(ac => ac.status === 'satisfied').length ?? 0;
 
+    // Attach test_refs_result for inconclusive stories (files exist, no test output)
+    const tr = testRefsResults?.get(story.story_id);
+
     return {
       story,
       status: r.status,
@@ -200,6 +286,7 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
       ac_results: acResults,
       acs_satisfied: acTotal > 0 ? acSatisfied : undefined,
       acs_total: acTotal > 0 ? acTotal : undefined,
+      test_refs_result: tr?.verdict === 'inconclusive' ? tr : undefined,
     };
   });
 
@@ -213,7 +300,8 @@ Include ALL ${auditable.length} stories. Omit ac_results if the story has no acc
     files_touched: [],
   }));
 
-  return [...auditedResults, ...skippedResults];
+  // Merge: deterministic results first, then Claude-audited, then skipped
+  return [...deterministicResults, ...auditedResults, ...skippedResults];
 }
 
 /**

@@ -12,6 +12,7 @@ import { parseStoriesFile } from './parse-stories';
 import { getPrDiff } from './get-diff';
 import { auditStoriesWithClaude, buildReport } from './audit';
 import { buildCommentBody, postOrUpdateComment } from './comment';
+import { auditAllTestRefs } from './test-refs-audit';
 
 async function run(): Promise<void> {
   const inputs: ActionInputs = {
@@ -23,6 +24,7 @@ async function run(): Promise<void> {
     githubToken: core.getInput('github-token') || process.env.GITHUB_TOKEN || '',
     model: core.getInput('model') || 'claude-haiku-4-5',
     statusOnly: core.getInput('status-only') === 'true',
+    testOutputPath: core.getInput('test-output-path') || undefined,
   };
 
   core.debug(`stories-path: ${inputs.storiesPath}`);
@@ -81,7 +83,23 @@ async function run(): Promise<void> {
     core.warning('PR has no file changes — coverage is 0%');
   }
 
-  // 3. Audit with Claude (divergence + coverage)
+  // 3a. Deterministic test_refs audit (VON-101)
+  core.info('🔬 Running deterministic test_refs check...');
+  let testRefsResults;
+  try {
+    testRefsResults = await auditAllTestRefs(
+      stories,
+      inputs.githubToken,
+      diff.head_sha,
+      inputs.testOutputPath
+    );
+  } catch (err) {
+    // Non-fatal — warn and fall through to Claude-only audit
+    core.warning(`test_refs audit failed (non-fatal): ${(err as Error).message}`);
+    testRefsResults = new Map();
+  }
+
+  // 3b. Audit with Claude (divergence + coverage) for stories not resolved deterministically
   core.info(`🤖 Auditing with ${inputs.model}...`);
   let auditResults;
   try {
@@ -89,7 +107,8 @@ async function run(): Promise<void> {
       stories,
       diff,
       inputs.anthropicApiKey,
-      inputs.model
+      inputs.model,
+      testRefsResults
     );
   } catch (err) {
     core.setFailed(`Claude audit failed: ${(err as Error).message}`);

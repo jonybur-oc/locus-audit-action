@@ -47,6 +47,16 @@ inputs:
     required: false
     default: 'false'
 
+  test-output-path:
+    description: |
+      Optional path to a jest or cypress JSON test output file (relative to repo root).
+      When provided, the action uses test results to deterministically verify stories that
+      have test_refs with [story_id] patterns in test names (e.g. [BT-07]).
+      Supports jest --json reporter output and cypress mochawesome JSON format.
+      If omitted, test_refs file existence is still checked but pass/fail is not verified.
+    required: false
+    default: ''
+
 outputs:
   coverage-percent:
     description: 'Story coverage percentage (integer 0–100)'
