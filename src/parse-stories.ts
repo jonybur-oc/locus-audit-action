@@ -37,6 +37,12 @@ export function parseStoriesFile(storiesPath: string): Story[] {
   // Validate that each story has at minimum an id and title
   const valid: Story[] = [];
   for (const s of stories) {
+    // Support story_id (canonical Locus spec field) as alias for id
+    const raw = s as Story & { story_id?: string };
+    if (!s.id && raw.story_id) {
+      s.id = raw.story_id;
+    }
+
     if (!s.id && !s.title) {
       continue; // skip entirely blank entries
     }
