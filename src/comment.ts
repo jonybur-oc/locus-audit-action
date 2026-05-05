@@ -12,11 +12,12 @@ function badge(percent: number, passed: boolean, hasDivergence: boolean): string
 /** Icon for story-level status */
 function statusIcon(status: StoryAuditResult['status']): string {
   switch (status) {
-    case 'satisfied':   return '✅';
-    case 'partial':     return '⚠️';
-    case 'not-covered': return '—';
-    case 'diverged':    return '❌';
-    case 'skipped':     return '⏭️';
+    case 'satisfied':    return '✅';
+    case 'partial':      return '⚠️';
+    case 'not-covered':  return '—';
+    case 'diverged':     return '❌';
+    case 'skipped':      return '⏭️';
+    case 'not-affected': return '📁';
   }
 }
 
@@ -30,9 +31,10 @@ function statusLabel(r: StoryAuditResult): string {
         : '';
       return `partial${frac}`;
     }
-    case 'not-covered': return 'not covered';
-    case 'diverged':    return `diverged — ${r.evidence.slice(0, 80)}`;
-    case 'skipped':     return `skipped (${r.story.status ?? 'unknown status'})`;
+    case 'not-covered':  return 'not covered';
+    case 'diverged':     return `diverged — ${r.evidence.slice(0, 80)}`;
+    case 'skipped':      return `skipped (${r.story.status ?? 'unknown status'})`;
+    case 'not-affected': return 'not affected by this PR (file_refs)';
   }
 }
 
@@ -86,11 +88,12 @@ export function buildCommentBody(report: AuditReport): string {
   const tableHeader = `| | ID | Story | Status |\n|---|---|---|---|`;
 
   // Group stories by status for display
-  const divergedRows   = report.results.filter(r => r.status === 'diverged').map(storyRow);
-  const partialRows    = report.results.filter(r => r.status === 'partial').map(storyRow);
-  const satisfiedRows  = report.results.filter(r => r.status === 'satisfied').map(storyRow);
-  const notCoveredRows = report.results.filter(r => r.status === 'not-covered').map(storyRow);
-  const skippedRows    = report.results.filter(r => r.status === 'skipped').map(storyRow);
+  const divergedRows    = report.results.filter(r => r.status === 'diverged').map(storyRow);
+  const partialRows     = report.results.filter(r => r.status === 'partial').map(storyRow);
+  const satisfiedRows   = report.results.filter(r => r.status === 'satisfied').map(storyRow);
+  const notCoveredRows  = report.results.filter(r => r.status === 'not-covered').map(storyRow);
+  const notAffectedRows = report.results.filter(r => r.status === 'not-affected').map(storyRow);
+  const skippedRows     = report.results.filter(r => r.status === 'skipped').map(storyRow);
 
   let body = `${COMMENT_MARKER}
 ## ${badge(coverage_percent, passed, hasDivergence)} ${headerLine}
@@ -113,6 +116,11 @@ ${failBlock}`;
   if (notCoveredRows.length > 0) {
     // Collapse not-covered to keep comment clean — use a <details> block
     body += `\n<details>\n<summary>— Not covered by this PR (${notCoveredRows.length})</summary>\n\n${tableHeader}\n${notCoveredRows.join('\n')}\n\n</details>\n`;
+  }
+
+  if (notAffectedRows.length > 0) {
+    // Collapsed not-affected section — stories with file_refs that don't match this PR's diff
+    body += `\n<details>\n<summary>📁 Not affected by this PR (${notAffectedRows.length}) — file_refs didn't match changed files</summary>\n\n${tableHeader}\n${notAffectedRows.join('\n')}\n\n</details>\n`;
   }
 
   if (skippedRows.length > 0) {

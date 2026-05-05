@@ -14,6 +14,14 @@ export interface Story {
   depends_on?: string[];
   design_ref?: string;
   test_refs?: string[];
+  /**
+   * file_refs: optional list of file paths (relative to repo root) that implement this story.
+   * Supports glob patterns (e.g. src/deposit/**\/*.ts).
+   * When present: the CI audit action only audits this story if at least one listed file
+   * appears in the PR diff. Stories with no file_refs fall back to Claude inference.
+   * Added in spec v1.3 (VON-107).
+   */
+  file_refs?: string[];
   // legacy / extended fields
   as_a?: string;
   i_want?: string;
@@ -38,15 +46,16 @@ export interface AcResult {
 /**
  * Per-story result from divergence audit.
  * status:
- *   satisfied   — all ACs covered by this PR
- *   partial     — some ACs covered, none diverged
- *   not-covered — diff doesn't touch this story
- *   diverged    — diff actively contradicts at least one AC
- *   skipped     — excluded from audit (deprecated / in-progress / implemented)
+ *   satisfied    — all ACs covered by this PR
+ *   partial      — some ACs covered, none diverged
+ *   not-covered  — diff doesn't touch this story
+ *   diverged     — diff actively contradicts at least one AC
+ *   skipped      — excluded from audit (deprecated / in-progress / implemented)
+ *   not-affected — story has file_refs and none matched the PR diff (deterministic skip)
  */
 export interface StoryAuditResult {
   story: Story;
-  status: 'satisfied' | 'partial' | 'not-covered' | 'diverged' | 'skipped';
+  status: 'satisfied' | 'partial' | 'not-covered' | 'diverged' | 'skipped' | 'not-affected';
   /** Backward-compat alias: true when status === 'satisfied' or 'partial' */
   covered: boolean;
   confidence: 'high' | 'medium' | 'low';

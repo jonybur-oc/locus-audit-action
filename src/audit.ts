@@ -1,8 +1,58 @@
 import Anthropic from '@anthropic-ai/sdk';
 import * as core from '@actions/core';
+import * as path from 'path';
 import { Story, StoryAuditResult, AuditReport, AcResult } from './types';
 import { PrDiff } from './get-diff';
 import { TestRefsResult } from './test-refs-audit';
+
+/**
+ * Checks whether a single PR-changed filename matches any pattern in file_refs.
+ * Uses path.matchesGlob (Node ≥22) for glob support.
+ * Patterns are relative to repo root; so are PR filenames.
+ */
+function fileMatchesAnyRef(filename: string, fileRefs: string[]): boolean {
+  for (const pattern of fileRefs) {
+    try {
+      if (path.matchesGlob(filename, pattern)) return true;
+    } catch {
+      // Fallback: plain string equality if glob fails (e.g. on older Node)
+      if (filename === pattern) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Given a list of stories and PR changed filenames, splits stories into two groups:
+ * - toAudit:     stories with no file_refs, OR stories with file_refs that match ≥1 changed file
+ * - notAffected: stories with file_refs where NO changed file matches any pattern
+ *
+ * Stories in notAffected get a deterministic 'not-affected' result without calling Claude.
+ */
+function partitionByFileRefs(
+  stories: Story[],
+  changedFiles: string[]
+): { toAudit: Story[]; notAffected: Story[] } {
+  const toAudit: Story[] = [];
+  const notAffected: Story[] = [];
+
+  for (const story of stories) {
+    if (!story.file_refs || story.file_refs.length === 0) {
+      // No file_refs — use Claude inference (existing behaviour)
+      toAudit.push(story);
+      continue;
+    }
+
+    const matched = changedFiles.some(f => fileMatchesAnyRef(f, story.file_refs!));
+    if (matched) {
+      toAudit.push(story);
+    } else {
+      notAffected.push(story);
+    }
+  }
+
+  return { toAudit, notAffected };
+}
 
 const SYSTEM_PROMPT = `You are a story divergence auditor. Given a PR diff and a list of user stories with acceptance criteria, determine:
 
@@ -77,12 +127,35 @@ export async function auditStoriesWithClaude(
   const auditable = stories.filter(s => !SKIP_STATUSES.has(s.status ?? ''));
   const skipped   = stories.filter(s => SKIP_STATUSES.has(s.status ?? ''));
 
+  // ── file_refs pre-pass ───────────────────────────────────────────────────
+  // For stories that declare file_refs, deterministically check whether any of their
+  // referenced files appear in the PR diff. Stories with file_refs that don't match
+  // any changed file are marked 'not-affected' and excluded from the Claude call.
+  const changedFilenames = diff.files.map(f => f.filename);
+  const { toAudit: auditableFiltered, notAffected } = partitionByFileRefs(auditable, changedFilenames);
+
+  const notAffectedResults: StoryAuditResult[] = notAffected.map(story => ({
+    story,
+    status: 'not-affected' as const,
+    covered: false,
+    confidence: 'high' as const,
+    evidence: `file_refs not matched by PR diff — story not affected by this change (${story.file_refs!.join(', ')})`,
+    files_touched: [],
+  }));
+
+  if (notAffectedResults.length > 0) {
+    core.info(
+      `📁 ${notAffectedResults.length} ${notAffectedResults.length === 1 ? 'story' : 'stories'} skipped via file_refs ` +
+      `— not affected by this PR's diff`
+    );
+  }
+
   // ── Deterministic test_refs pre-pass ──────────────────────────────────────
   // Resolve stories that have definitive test_refs verdicts before calling Claude.
   const deterministicResults: StoryAuditResult[] = [];
   const needsClaudeAudit: Story[] = [];
 
-  for (const story of auditable) {
+  for (const story of auditableFiltered) {
     const tr = testRefsResults?.get(story.story_id);
 
     if (!tr || tr.verdict === 'no-test-refs') {
@@ -140,7 +213,7 @@ export async function auditStoriesWithClaude(
     );
   }
 
-  core.debug(`Auditing ${needsClaudeAudit.length} stories via Claude; ${deterministicResults.length} resolved deterministically; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
+  core.debug(`Auditing ${needsClaudeAudit.length} stories via Claude; ${deterministicResults.length} resolved deterministically; ${notAffectedResults.length} not-affected (file_refs); skipping ${skipped.length} (deprecated/in-progress/implemented)`);
 
   // Return early if nothing to audit via Claude
   if (needsClaudeAudit.length === 0) {
@@ -152,7 +225,7 @@ export async function auditStoriesWithClaude(
       evidence: `skipped — story status is '${story.status}'`,
       files_touched: [],
     }));
-    return [...deterministicResults, ...skippedResults];
+    return [...deterministicResults, ...notAffectedResults, ...skippedResults];
   }
 
   // Build a compact story list for the prompt
@@ -300,14 +373,15 @@ Include ALL ${needsClaudeAudit.length} stories. Omit ac_results if the story has
     files_touched: [],
   }));
 
-  // Merge: deterministic results first, then Claude-audited, then skipped
-  return [...deterministicResults, ...auditedResults, ...skippedResults];
+  // Merge: deterministic results first, then Claude-audited, then not-affected (file_refs), then skipped
+  return [...deterministicResults, ...auditedResults, ...notAffectedResults, ...skippedResults];
 }
 
 /**
  * Builds the AuditReport from raw story results and action config.
  * Skipped stories (deprecated / in-progress / implemented) are excluded from
  * coverage calculations per spec rules 8.1.5 and 8.1.6.
+ * not-affected stories (file_refs didn't match PR diff) are also excluded from metrics.
  */
 export function buildReport(
   results: StoryAuditResult[],
@@ -315,8 +389,8 @@ export function buildReport(
   failOnMissing: boolean,
   failOnDivergence: boolean
 ): AuditReport {
-  // Exclude skipped stories from all metrics
-  const audited = results.filter(r => r.status !== 'skipped');
+  // Exclude skipped and not-affected stories from all metrics
+  const audited = results.filter(r => r.status !== 'skipped' && r.status !== 'not-affected');
   const total = audited.length;
   const covered = audited.filter(r => r.covered).length;
   const uncovered = audited.filter(r => r.status === 'not-covered').length;

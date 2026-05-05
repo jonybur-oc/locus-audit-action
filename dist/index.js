@@ -35684,6 +35684,52 @@ exports.auditStoriesWithClaude = auditStoriesWithClaude;
 exports.buildReport = buildReport;
 const sdk_1 = __importDefault(__nccwpck_require__(121));
 const core = __importStar(__nccwpck_require__(7484));
+const path = __importStar(__nccwpck_require__(6928));
+/**
+ * Checks whether a single PR-changed filename matches any pattern in file_refs.
+ * Uses path.matchesGlob (Node ≥22) for glob support.
+ * Patterns are relative to repo root; so are PR filenames.
+ */
+function fileMatchesAnyRef(filename, fileRefs) {
+    for (const pattern of fileRefs) {
+        try {
+            if (path.matchesGlob(filename, pattern))
+                return true;
+        }
+        catch {
+            // Fallback: plain string equality if glob fails (e.g. on older Node)
+            if (filename === pattern)
+                return true;
+        }
+    }
+    return false;
+}
+/**
+ * Given a list of stories and PR changed filenames, splits stories into two groups:
+ * - toAudit:     stories with no file_refs, OR stories with file_refs that match ≥1 changed file
+ * - notAffected: stories with file_refs where NO changed file matches any pattern
+ *
+ * Stories in notAffected get a deterministic 'not-affected' result without calling Claude.
+ */
+function partitionByFileRefs(stories, changedFiles) {
+    const toAudit = [];
+    const notAffected = [];
+    for (const story of stories) {
+        if (!story.file_refs || story.file_refs.length === 0) {
+            // No file_refs — use Claude inference (existing behaviour)
+            toAudit.push(story);
+            continue;
+        }
+        const matched = changedFiles.some(f => fileMatchesAnyRef(f, story.file_refs));
+        if (matched) {
+            toAudit.push(story);
+        }
+        else {
+            notAffected.push(story);
+        }
+    }
+    return { toAudit, notAffected };
+}
 const SYSTEM_PROMPT = `You are a story divergence auditor. Given a PR diff and a list of user stories with acceptance criteria, determine:
 
 1. Which stories this PR **satisfies** (all acceptance criteria met by changes in the diff)
@@ -35728,11 +35774,29 @@ async function auditStoriesWithClaude(stories, diff, apiKey, model, testRefsResu
     // Split stories into auditable vs skipped
     const auditable = stories.filter(s => !SKIP_STATUSES.has(s.status ?? ''));
     const skipped = stories.filter(s => SKIP_STATUSES.has(s.status ?? ''));
+    // ── file_refs pre-pass ───────────────────────────────────────────────────
+    // For stories that declare file_refs, deterministically check whether any of their
+    // referenced files appear in the PR diff. Stories with file_refs that don't match
+    // any changed file are marked 'not-affected' and excluded from the Claude call.
+    const changedFilenames = diff.files.map(f => f.filename);
+    const { toAudit: auditableFiltered, notAffected } = partitionByFileRefs(auditable, changedFilenames);
+    const notAffectedResults = notAffected.map(story => ({
+        story,
+        status: 'not-affected',
+        covered: false,
+        confidence: 'high',
+        evidence: `file_refs not matched by PR diff — story not affected by this change (${story.file_refs.join(', ')})`,
+        files_touched: [],
+    }));
+    if (notAffectedResults.length > 0) {
+        core.info(`📁 ${notAffectedResults.length} ${notAffectedResults.length === 1 ? 'story' : 'stories'} skipped via file_refs ` +
+            `— not affected by this PR's diff`);
+    }
     // ── Deterministic test_refs pre-pass ──────────────────────────────────────
     // Resolve stories that have definitive test_refs verdicts before calling Claude.
     const deterministicResults = [];
     const needsClaudeAudit = [];
-    for (const story of auditable) {
+    for (const story of auditableFiltered) {
         const tr = testRefsResults?.get(story.story_id);
         if (!tr || tr.verdict === 'no-test-refs') {
             // No test_refs — Claude handles it
@@ -35787,7 +35851,7 @@ async function auditStoriesWithClaude(stories, diff, apiKey, model, testRefsResu
         core.info(`🔬 ${deterministicResults.length} ${deterministicResults.length === 1 ? 'story' : 'stories'} resolved deterministically via test_refs — ` +
             `${needsClaudeAudit.length} sent to Claude`);
     }
-    core.debug(`Auditing ${needsClaudeAudit.length} stories via Claude; ${deterministicResults.length} resolved deterministically; skipping ${skipped.length} (deprecated/in-progress/implemented)`);
+    core.debug(`Auditing ${needsClaudeAudit.length} stories via Claude; ${deterministicResults.length} resolved deterministically; ${notAffectedResults.length} not-affected (file_refs); skipping ${skipped.length} (deprecated/in-progress/implemented)`);
     // Return early if nothing to audit via Claude
     if (needsClaudeAudit.length === 0) {
         const skippedResults = skipped.map(story => ({
@@ -35798,7 +35862,7 @@ async function auditStoriesWithClaude(stories, diff, apiKey, model, testRefsResu
             evidence: `skipped — story status is '${story.status}'`,
             files_touched: [],
         }));
-        return [...deterministicResults, ...skippedResults];
+        return [...deterministicResults, ...notAffectedResults, ...skippedResults];
     }
     // Build a compact story list for the prompt
     const storyList = needsClaudeAudit.map(s => {
@@ -35933,17 +35997,18 @@ Include ALL ${needsClaudeAudit.length} stories. Omit ac_results if the story has
         evidence: `skipped — story status is '${story.status}'`,
         files_touched: [],
     }));
-    // Merge: deterministic results first, then Claude-audited, then skipped
-    return [...deterministicResults, ...auditedResults, ...skippedResults];
+    // Merge: deterministic results first, then Claude-audited, then not-affected (file_refs), then skipped
+    return [...deterministicResults, ...auditedResults, ...notAffectedResults, ...skippedResults];
 }
 /**
  * Builds the AuditReport from raw story results and action config.
  * Skipped stories (deprecated / in-progress / implemented) are excluded from
  * coverage calculations per spec rules 8.1.5 and 8.1.6.
+ * not-affected stories (file_refs didn't match PR diff) are also excluded from metrics.
  */
 function buildReport(results, minCoverage, failOnMissing, failOnDivergence) {
-    // Exclude skipped stories from all metrics
-    const audited = results.filter(r => r.status !== 'skipped');
+    // Exclude skipped and not-affected stories from all metrics
+    const audited = results.filter(r => r.status !== 'skipped' && r.status !== 'not-affected');
     const total = audited.length;
     const covered = audited.filter(r => r.covered).length;
     const uncovered = audited.filter(r => r.status === 'not-covered').length;
@@ -36026,6 +36091,7 @@ function statusIcon(status) {
         case 'not-covered': return '—';
         case 'diverged': return '❌';
         case 'skipped': return '⏭️';
+        case 'not-affected': return '📁';
     }
 }
 /** Short label for story-level status */
@@ -36041,6 +36107,7 @@ function statusLabel(r) {
         case 'not-covered': return 'not covered';
         case 'diverged': return `diverged — ${r.evidence.slice(0, 80)}`;
         case 'skipped': return `skipped (${r.story.status ?? 'unknown status'})`;
+        case 'not-affected': return 'not affected by this PR (file_refs)';
     }
 }
 function storyRow(r) {
@@ -36089,6 +36156,7 @@ function buildCommentBody(report) {
     const partialRows = report.results.filter(r => r.status === 'partial').map(storyRow);
     const satisfiedRows = report.results.filter(r => r.status === 'satisfied').map(storyRow);
     const notCoveredRows = report.results.filter(r => r.status === 'not-covered').map(storyRow);
+    const notAffectedRows = report.results.filter(r => r.status === 'not-affected').map(storyRow);
     const skippedRows = report.results.filter(r => r.status === 'skipped').map(storyRow);
     let body = `${COMMENT_MARKER}
 ## ${badge(coverage_percent, passed, hasDivergence)} ${headerLine}
@@ -36107,6 +36175,10 @@ ${failBlock}`;
     if (notCoveredRows.length > 0) {
         // Collapse not-covered to keep comment clean — use a <details> block
         body += `\n<details>\n<summary>— Not covered by this PR (${notCoveredRows.length})</summary>\n\n${tableHeader}\n${notCoveredRows.join('\n')}\n\n</details>\n`;
+    }
+    if (notAffectedRows.length > 0) {
+        // Collapsed not-affected section — stories with file_refs that don't match this PR's diff
+        body += `\n<details>\n<summary>📁 Not affected by this PR (${notAffectedRows.length}) — file_refs didn't match changed files</summary>\n\n${tableHeader}\n${notAffectedRows.join('\n')}\n\n</details>\n`;
     }
     if (skippedRows.length > 0) {
         // Collapsed skipped section — deprecated/in-progress/implemented stories excluded from audit
