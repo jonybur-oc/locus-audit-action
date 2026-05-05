@@ -1,4 +1,5 @@
-schema_version: "1.2"
+# yaml-language-server: $schema=https://locus.dev/schema/v1.5/stories.schema.json
+schema_version: "1.5"
 project:
   name: "locus-audit-action"
 
