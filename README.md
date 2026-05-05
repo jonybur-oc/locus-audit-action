@@ -1,6 +1,6 @@
 # Locus Story Coverage Audit
 
-[![Locus](https://img.shields.io/badge/spec-stories.yaml-6366f1?style=flat)](https://locus-site-omega.vercel.app)
+[![stories.yaml](https://img.shields.io/badge/stories.yaml-passing-6366f1?style=flat)](https://locus-site-omega.vercel.app)
 
 > CI enforcement for your product specification. Fails the build if code diverges from the spec.
 
