@@ -1,0 +1,50 @@
+schema_version: "1.2"
+project:
+  name: "locus-audit-action"
+
+stories:
+  - story_id: LA-01
+    title: Action runs on every pull request and posts a coverage report
+    section: Core
+    status: implemented
+    acceptance_criteria:
+      - "Action triggers on pull_request events"
+      - "A structured comment is posted on the PR showing story coverage"
+      - "Comment shows satisfied, partial, and diverged stories"
+      - "Comment updates on subsequent pushes to the same PR"
+
+  - story_id: LA-02
+    title: Action fails the build when stories diverge (opt-in)
+    section: Core
+    status: implemented
+    acceptance_criteria:
+      - "fail-on-divergence input defaults to false (informational)"
+      - "When fail-on-divergence is true, the action exits non-zero if any story diverges"
+      - "Failure message identifies which stories diverged"
+
+  - story_id: LA-03
+    title: Action enforces minimum coverage threshold (opt-in)
+    section: Core
+    status: implemented
+    acceptance_criteria:
+      - "min-coverage input defaults to 0 (no threshold)"
+      - "When min-coverage is set, the action fails if coverage % falls below it"
+      - "Coverage percentage is calculated as implemented / total active stories"
+
+  - story_id: LA-04
+    title: Action works with any stories.yaml path
+    section: Configuration
+    status: implemented
+    acceptance_criteria:
+      - "stories-path input defaults to stories.yaml"
+      - "Custom paths are respected (e.g. .locus/stories.yaml)"
+      - "Action fails with a clear error if the file is not found"
+
+  - story_id: LA-05
+    title: Action is listed on GitHub Marketplace
+    section: Distribution
+    status: implemented
+    acceptance_criteria:
+      - "Action appears in GitHub Marketplace search results"
+      - "Category: Code Quality"
+      - "README includes quick-start workflow snippet"

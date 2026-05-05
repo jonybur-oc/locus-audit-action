@@ -1,5 +1,7 @@
 # Locus Story Coverage Audit
 
+[![Locus](https://img.shields.io/badge/spec-stories.yaml-6366f1?style=flat)](https://locus-site-omega.vercel.app)
+
 > CI enforcement for your product specification. Fails the build if code diverges from the spec.
 
 Reads `stories.yaml` — your single source of truth for product requirements — fetches the PR diff, checks which stories are satisfied, partial, or **diverged**, and posts a structured report as a PR comment. Like a test suite, but for what the product is supposed to do.
@@ -176,3 +178,4 @@ Spec: [github.com/jonybur/locus](https://github.com/jonybur/locus)
 ---
 
 MIT © Jony Bursztyn
+
